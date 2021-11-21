@@ -24,7 +24,7 @@ extra-source-files:
 library
   build-depends:
     , async
-    , base
+    , base >=4.13.0.0 && <=4.17.0.0
     , bytestring
     , containers
     , data-default
