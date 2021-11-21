@@ -1,5 +1,5 @@
 {
-  description = "haskell-template's description";
+  description = "unionmount's description";
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
     flake-compat = {
@@ -16,7 +16,7 @@
         project = returnShellEnv:
           pkgs.haskellPackages.developPackage {
             inherit returnShellEnv;
-            name = "haskell-template";
+            name = "unionmount";
             root = ./.;
             withHoogle = false;
             overrides = self: super: with pkgs.haskell.lib; {
