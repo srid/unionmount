@@ -34,6 +34,56 @@ import System.FilePattern.Directory (getDirectoryFilesIgnore)
 import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race_, try, withRunInIO, writeTBQueue)
 import UnliftIO.STM (TBQueue, readTBQueue)
 
+-- | Simplified variation of `unionMountOnLVar` with exactly one source.
+mountOnLVar ::
+  forall model m b.
+  ( MonadIO m,
+    MonadUnliftIO m,
+    MonadLogger m,
+    Show b,
+    Ord b
+  ) =>
+  -- | The directory to mount.
+  FilePath ->
+  -- | Only include these files (exclude everything else)
+  [(b, FilePattern)] ->
+  -- | Ignore these patterns
+  [FilePattern] ->
+  -- | The `LVar` onto which to mount.
+  --
+  -- NOTE: It must not be set already. Otherwise, the value will be overriden
+  -- with the initial value argument (next).
+  -- LVar model ->
+  -- | Initial value of model, onto which to apply updates.
+  model ->
+  -- | How to update the model given a file action.
+  --
+  -- `b` is the tag associated with the `FilePattern` that selected this
+  -- `FilePath`. `FileAction` is the operation performed on this path. This
+  -- should return a function (in monadic context) that will update the model,
+  -- to reflect the given `FileAction`.
+  --
+  -- If the action throws an exception, it will be logged and ignored.
+  (b -> FilePath -> FileAction () -> m (model -> model)) ->
+  m (NonEmptyLVar m model)
+mountOnLVar folder pats ignore var0 toAction' =
+  let tag0 = ()
+      sources = one (tag0, folder)
+   in unionMountOnLVar sources pats ignore var0 $ \ch -> do
+        let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
+        (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
+  where
+    -- Monadic version of `chain`
+    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
+    chainM f =
+      fmap chain . mapM f
+      where
+        -- Apply the list of actions in the given order to an initial argument.
+        --
+        -- chain [f1, f2, ...] a = ... (f2 (f1 x))
+        chain :: [a -> a] -> a -> a
+        chain = flip $ foldl' $ flip ($)
+
 -- | Like `unionMount` but updates a `LVar` as well handles exceptions (and
 -- unhandled events) by logging them.
 unionMountOnLVar ::
@@ -150,56 +200,6 @@ unionMount sources pats ignore = do
                             loop
               loop
       )
-
--- | Simplified variation of `unionMountOnLVar` with exactly one source.
-mountOnLVar ::
-  forall model m b.
-  ( MonadIO m,
-    MonadUnliftIO m,
-    MonadLogger m,
-    Show b,
-    Ord b
-  ) =>
-  -- | The directory to mount.
-  FilePath ->
-  -- | Only include these files (exclude everything else)
-  [(b, FilePattern)] ->
-  -- | Ignore these patterns
-  [FilePattern] ->
-  -- | The `LVar` onto which to mount.
-  --
-  -- NOTE: It must not be set already. Otherwise, the value will be overriden
-  -- with the initial value argument (next).
-  -- LVar model ->
-  -- | Initial value of model, onto which to apply updates.
-  model ->
-  -- | How to update the model given a file action.
-  --
-  -- `b` is the tag associated with the `FilePattern` that selected this
-  -- `FilePath`. `FileAction` is the operation performed on this path. This
-  -- should return a function (in monadic context) that will update the model,
-  -- to reflect the given `FileAction`.
-  --
-  -- If the action throws an exception, it will be logged and ignored.
-  (b -> FilePath -> FileAction () -> m (model -> model)) ->
-  m (NonEmptyLVar m model)
-mountOnLVar folder pats ignore var0 toAction' =
-  let tag0 = ()
-      sources = one (tag0, folder)
-   in unionMountOnLVar sources pats ignore var0 $ \ch -> do
-        let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
-        (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
-  where
-    -- Monadic version of `chain`
-    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
-    chainM f =
-      fmap chain . mapM f
-      where
-        -- Apply the list of actions in the given order to an initial argument.
-        --
-        -- chain [f1, f2, ...] a = ... (f2 (f1 x))
-        chain :: [a -> a] -> a -> a
-        chain = flip $ foldl' $ flip ($)
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
 filesMatching parent' pats ignore = do
