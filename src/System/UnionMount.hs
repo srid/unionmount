@@ -112,7 +112,7 @@ unionMountOnLVar sources pats ignore model0 handleAction = do
   -- /after/ the initial file listing is read, and `modify` is called for each
   -- subsequent inotify events.
   (x0, xf) <- unionMount sources pats ignore
-  x0' <- handleAction x0
+  x0' <- interceptExceptions id $ handleAction x0
   pure
     ( x0' model0,
       \lvar -> do
@@ -128,7 +128,7 @@ interceptExceptions :: (MonadIO m, MonadUnliftIO m, MonadLogger m) => a -> m a -
 interceptExceptions default_ f = do
   try f >>= \case
     Left (ex :: SomeException) -> do
-      log LevelError $ "User exception: " <> show ex
+      log LevelError $ "Change handler exception: " <> show ex
       pure default_
     Right v ->
       pure v
@@ -325,7 +325,7 @@ watchTreeM wm fp pr f =
     watchTree wm fp pr $ \evt -> run (f evt)
 
 log :: MonadLogger m => LogLevel -> Text -> m ()
-log = logWithoutLoc "Ema.Helper.FileSystem"
+log = logWithoutLoc "System.UnionMount"
 
 -- TODO: Abstract in module with StateT / MonadState
 newtype OverlayFs source = OverlayFs
