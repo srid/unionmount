@@ -31,7 +31,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative)
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race_, try, withRunInIO, writeTBQueue)
+import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
 import UnliftIO.STM (TBQueue, readTBQueue)
 
 -- | Simplified variation of `unionMountOnLVar` with exactly one source.
@@ -83,6 +83,13 @@ mountOnLVar folder pats ignore var0 toAction' =
         -- chain [f1, f2, ...] a = ... (f2 (f1 x))
         chain :: [a -> a] -> a -> a
         chain = flip $ foldl' $ flip ($)
+
+type NonEmptyLVar m a =
+  ( -- Initial value
+    a,
+    -- Generator for subsequent values
+    LVar a -> m Cmd
+  )
 
 -- | Like `unionMount` but updates a `LVar` as well handles exceptions (and
 -- unhandled events) by logging them.
@@ -139,13 +146,6 @@ data Cmd
   = Cmd_Remount
   deriving (Eq, Show)
 
-type NonEmptyLVar m a =
-  ( -- Initial value
-    a,
-    -- Generator for subsequent values
-    LVar a -> m ()
-  )
-
 unionMount ::
   forall source tag m.
   ( MonadIO m,
@@ -157,8 +157,11 @@ unionMount ::
   Set (source, FilePath) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
-  -- (Change source tag -> m (Maybe Cmd)) ->
-  m (Change source tag, (Change source tag -> m ()) -> m ())
+  m
+    ( Change source tag,
+      (Change source tag -> m ()) ->
+      m Cmd
+    )
 unionMount sources pats ignore = do
   fmap fst . flip runStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
@@ -175,30 +178,31 @@ unionMount sources pats ignore = do
         \reportChange -> do
           -- Run fsnotify on sources
           q :: TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO $ newTBQueueIO 1
-          race_ (onChange q (toList sources)) $
-            fmap fst . flip runStateT ofs $ do
-              let loop = do
-                    (src, fp, actE) <- atomically $ readTBQueue q
-                    let shouldIgnore = any (?== fp) ignore
-                    case actE of
-                      Left _ -> do
-                        if shouldIgnore
-                          then do
-                            log LevelWarn "Unhandled folder event on an ignored path"
-                            loop
-                          else do
-                            -- We don't know yet how to deal with folder events. Just reboot the mount.
-                            log LevelWarn "Unhandled folder event; suggesting a re-mount"
-                            pure () -- Exit, asking user to remokunt; TODO: valiue?
-                      Right act -> do
-                        case guard (not shouldIgnore) >> getTag pats fp of
-                          Nothing -> loop
-                          Just tag -> do
-                            changes <- fmap snd . flip runStateT Map.empty $ do
-                              put =<< lift . changeInsert src tag fp act =<< get
-                            lift $ reportChange changes
-                            loop
-              loop
+          fmap (either id id) $
+            race (onChange q (toList sources)) $
+              fmap fst . flip runStateT ofs $ do
+                let loop = do
+                      (src, fp, actE) <- atomically $ readTBQueue q
+                      let shouldIgnore = any (?== fp) ignore
+                      case actE of
+                        Left _ -> do
+                          if shouldIgnore
+                            then do
+                              log LevelWarn "Unhandled folder event on an ignored path"
+                              loop
+                            else do
+                              -- We don't know yet how to deal with folder events. Just reboot the mount.
+                              log LevelWarn "Unhandled folder event; suggesting a re-mount"
+                              pure Cmd_Remount -- Exit, asking user to remokunt
+                        Right act -> do
+                          case guard (not shouldIgnore) >> getTag pats fp of
+                            Nothing -> loop
+                            Just tag -> do
+                              changes <- fmap snd . flip runStateT Map.empty $ do
+                                put =<< lift . changeInsert src tag fp act =<< get
+                              lift $ reportChange changes
+                              loop
+                loop
       )
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
@@ -267,7 +271,7 @@ onChange ::
   [(x, FilePath)] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
-  m ()
+  m Cmd
 onChange q roots = do
   -- 100ms is a reasonable wait period to gather (possibly related) events.
   -- One such related event is a MOVE, which fsnotify doesn't native support;
@@ -296,6 +300,8 @@ onChange q roots = do
       `finally` do
         log LevelInfo "Stopping fsnotify monitor."
         liftIO $ forM_ stops id
+    -- Unreachable
+    pure Cmd_Remount
 
 withManagerM ::
   (MonadIO m, MonadUnliftIO m) =>
