@@ -88,7 +88,7 @@ type NonEmptyLVar m a =
   ( -- Initial value
     a,
     -- Generator for subsequent values
-    LVar a -> m Cmd
+    LVar a -> m ()
   )
 
 -- | Like `unionMount` but updates a `LVar` as well handles exceptions (and
@@ -116,9 +116,13 @@ unionMountOnLVar sources pats ignore model0 handleAction = do
   pure
     ( x0' model0,
       \lvar -> do
-        xf $ \change -> do
+        Cmd_Remount <- xf $ \change -> do
           change' <- interceptExceptions id $ handleAction change
           LVar.modify lvar change'
+        log LevelInfo "Remounting..."
+        (a, b) <- unionMountOnLVar sources pats ignore model0 handleAction
+        LVar.set lvar a
+        b lvar
     )
 
 -- Log and ignore exceptions
