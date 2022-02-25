@@ -125,6 +125,41 @@ unionMountOnLVar sources pats ignore model0 handleAction = do
         b lvar
     )
 
+-- TODO: finalize and rename
+unionMount1 ::
+  forall source tag model m.
+  ( MonadIO m,
+    MonadUnliftIO m,
+    MonadLogger m,
+    Ord source,
+    Ord tag
+  ) =>
+  Set (source, FilePath) ->
+  [(tag, FilePattern)] ->
+  [FilePattern] ->
+  model ->
+  (Change source tag -> m (model -> model)) ->
+  m (model, (model -> m ()) -> m ())
+unionMount1 sources pats ignore model0 handleAction = do
+  -- This TMVar is used to ensure the LVar semantics that `set` is called once
+  -- /after/ the initial file listing is read, and `modify` is called for each
+  -- subsequent inotify events.
+  (x0, xf) <- unionMount sources pats ignore
+  x0' <- interceptExceptions id $ handleAction x0
+  let initial = x0' model0
+  lvar <- LVar.new initial
+  let sender send = do
+        Cmd_Remount <- xf $ \change -> do
+          change' <- interceptExceptions id $ handleAction change
+          LVar.modify lvar change'
+          x <- LVar.get lvar
+          send x
+        log LevelInfo "Remounting..."
+        (a, b) <- unionMount1 sources pats ignore model0 handleAction
+        send a
+        b send
+  pure (x0' model0, sender)
+
 -- Log and ignore exceptions
 --
 -- TODO: Make user define-able?
