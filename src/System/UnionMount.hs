@@ -151,17 +151,19 @@ data Cmd
   deriving (Eq, Show)
 
 unionMount ::
-  forall source tag m.
+  forall source tag m m1.
   ( MonadIO m,
     MonadUnliftIO m,
     MonadLogger m,
+    MonadLogger m1,
+    MonadIO m1,
     Ord source,
     Ord tag
   ) =>
   Set (source, FilePath) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
-  m
+  m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
