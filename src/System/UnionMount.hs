@@ -125,6 +125,55 @@ unionMountOnLVar sources pats ignore model0 handleAction = do
         b lvar
     )
 
+mount ::
+  forall model m b.
+  ( MonadIO m,
+    MonadUnliftIO m,
+    MonadLogger m,
+    Show b,
+    Ord b
+  ) =>
+  -- | The directory to mount.
+  FilePath ->
+  -- | Only include these files (exclude everything else)
+  [(b, FilePattern)] ->
+  -- | Ignore these patterns
+  [FilePattern] ->
+  -- | The `LVar` onto which to mount.
+  --
+  -- NOTE: It must not be set already. Otherwise, the value will be overriden
+  -- with the initial value argument (next).
+  -- LVar model ->
+  -- | Initial value of model, onto which to apply updates.
+  model ->
+  -- | How to update the model given a file action.
+  --
+  -- `b` is the tag associated with the `FilePattern` that selected this
+  -- `FilePath`. `FileAction` is the operation performed on this path. This
+  -- should return a function (in monadic context) that will update the model,
+  -- to reflect the given `FileAction`.
+  --
+  -- If the action throws an exception, it will be logged and ignored.
+  (b -> FilePath -> FileAction () -> m (model -> model)) ->
+  m (model, (model -> m ()) -> m ())
+mount folder pats ignore var0 toAction' =
+  let tag0 = ()
+      sources = one (tag0, folder)
+   in unionMount1 sources pats ignore var0 $ \ch -> do
+        let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
+        (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
+  where
+    -- Monadic version of `chain`
+    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
+    chainM f =
+      fmap chain . mapM f
+      where
+        -- Apply the list of actions in the given order to an initial argument.
+        --
+        -- chain [f1, f2, ...] a = ... (f2 (f1 x))
+        chain :: [a -> a] -> a -> a
+        chain = flip $ foldl' $ flip ($)
+
 -- TODO: finalize and rename
 unionMount1 ::
   forall source tag model m.
