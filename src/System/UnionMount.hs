@@ -276,13 +276,14 @@ unionMount sources pats ignore = do
                       let shouldIgnore = any (?== fp) ignore
                       case actE of
                         Left _ -> do
+                          let reason = "Unhandled folder event on '" <> toText fp <> "'"
                           if shouldIgnore
                             then do
-                              log LevelWarn "Unhandled folder event on an ignored path"
+                              log LevelWarn $ reason <> " on an ignored path"
                               loop
                             else do
                               -- We don't know yet how to deal with folder events. Just reboot the mount.
-                              log LevelWarn "Unhandled folder event; suggesting a re-mount"
+                              log LevelWarn $ reason <> "; suggesting a re-mount"
                               pure Cmd_Remount -- Exit, asking user to remokunt
                         Right act -> do
                           case guard (not shouldIgnore) >> getTag pats fp of
