@@ -31,7 +31,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative)
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
+import UnliftIO (MonadUnliftIO, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
 import UnliftIO.STM (TBQueue, readTBQueue)
 
 -- | Simplified variation of `unionMountOnLVar` with exactly one source.
@@ -387,10 +387,13 @@ onChange q roots = do
             Modified (rel -> fp) _ _ -> f x fp $ Right $ Refresh Update ()
             Removed (rel -> fp) _ _ -> f x fp $ Right Delete
             Unknown (rel -> fp) _ _ -> f x fp $ Right Delete
+    let _stopWatcher :: m ()
+        _stopWatcher = do
+          log LevelInfo "Stopping fsnotify monitor."
+          liftIO $ forM_ stops id
     liftIO (threadDelay maxBound)
-      `finally` do
-        log LevelInfo "Stopping fsnotify monitor."
-        liftIO $ forM_ stops id
+    -- TODO: Not using this, for verifying https://github.com/ndmitchell/ghcid/issues/194
+    -- `finally` stopWatcher
     -- Unreachable
     pure Cmd_Remount
 
