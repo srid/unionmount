@@ -1,7 +1,18 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TypeApplications #-}
 
-module System.UnionMount where
+module System.UnionMount
+  ( -- * Mount endpoints
+    mount,
+    unionMount,
+    unionMount',
+
+    -- * Types
+    FileAction (..),
+    RefreshAction (..),
+    Change,
+  )
+where
 
 import Control.Concurrent (threadDelay)
 import Control.Monad.Logger
@@ -9,7 +20,6 @@ import Control.Monad.Logger
     MonadLogger,
     logWithoutLoc,
   )
-import Data.LVar (LVar)
 import qualified Data.LVar as LVar
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -34,97 +44,7 @@ import System.FilePattern.Directory (getDirectoryFilesIgnore)
 import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
 import UnliftIO.STM (TBQueue, readTBQueue)
 
--- | Simplified variation of `unionMountOnLVar` with exactly one source.
-mountOnLVar ::
-  forall model m b.
-  ( MonadIO m,
-    MonadUnliftIO m,
-    MonadLogger m,
-    Show b,
-    Ord b
-  ) =>
-  -- | The directory to mount.
-  FilePath ->
-  -- | Only include these files (exclude everything else)
-  [(b, FilePattern)] ->
-  -- | Ignore these patterns
-  [FilePattern] ->
-  -- | The `LVar` onto which to mount.
-  --
-  -- NOTE: It must not be set already. Otherwise, the value will be overriden
-  -- with the initial value argument (next).
-  -- LVar model ->
-  -- | Initial value of model, onto which to apply updates.
-  model ->
-  -- | How to update the model given a file action.
-  --
-  -- `b` is the tag associated with the `FilePattern` that selected this
-  -- `FilePath`. `FileAction` is the operation performed on this path. This
-  -- should return a function (in monadic context) that will update the model,
-  -- to reflect the given `FileAction`.
-  --
-  -- If the action throws an exception, it will be logged and ignored.
-  (b -> FilePath -> FileAction () -> m (model -> model)) ->
-  m (NonEmptyLVar m model)
-mountOnLVar folder pats ignore var0 toAction' =
-  let tag0 = ()
-      sources = one (tag0, folder)
-   in unionMountOnLVar sources pats ignore var0 $ \ch -> do
-        let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
-        (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
-  where
-    -- Monadic version of `chain`
-    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
-    chainM f =
-      fmap chain . mapM f
-      where
-        -- Apply the list of actions in the given order to an initial argument.
-        --
-        -- chain [f1, f2, ...] a = ... (f2 (f1 x))
-        chain :: [a -> a] -> a -> a
-        chain = flip $ foldl' $ flip ($)
-
-type NonEmptyLVar m a =
-  ( -- Initial value
-    a,
-    -- Generator for subsequent values
-    LVar a -> m ()
-  )
-
--- | Like `unionMount` but updates a `LVar` as well handles exceptions (and
--- unhandled events) by logging them.
-unionMountOnLVar ::
-  forall source tag model m.
-  ( MonadIO m,
-    MonadUnliftIO m,
-    MonadLogger m,
-    Ord source,
-    Ord tag
-  ) =>
-  Set (source, FilePath) ->
-  [(tag, FilePattern)] ->
-  [FilePattern] ->
-  model ->
-  (Change source tag -> m (model -> model)) ->
-  m (NonEmptyLVar m model)
-unionMountOnLVar sources pats ignore model0 handleAction = do
-  -- This TMVar is used to ensure the LVar semantics that `set` is called once
-  -- /after/ the initial file listing is read, and `modify` is called for each
-  -- subsequent inotify events.
-  (x0, xf) <- unionMount sources pats ignore
-  x0' <- interceptExceptions id $ handleAction x0
-  pure
-    ( x0' model0,
-      \lvar -> do
-        Cmd_Remount <- xf $ \change -> do
-          change' <- interceptExceptions id $ handleAction change
-          LVar.modify lvar change'
-        log LevelInfo "Remounting..."
-        (a, b) <- unionMountOnLVar sources pats ignore model0 handleAction
-        LVar.set lvar a
-        b lvar
-    )
-
+-- | Simplified version of `unionMount` with exactly one layer.
 mount ::
   forall model m b.
   ( MonadIO m,
@@ -139,11 +59,6 @@ mount ::
   [(b, FilePattern)] ->
   -- | Ignore these patterns
   [FilePattern] ->
-  -- | The `LVar` onto which to mount.
-  --
-  -- NOTE: It must not be set already. Otherwise, the value will be overriden
-  -- with the initial value argument (next).
-  -- LVar model ->
   -- | Initial value of model, onto which to apply updates.
   model ->
   -- | How to update the model given a file action.
@@ -159,7 +74,7 @@ mount ::
 mount folder pats ignore var0 toAction' =
   let tag0 = ()
       sources = one (tag0, folder)
-   in unionMount1 sources pats ignore var0 $ \ch -> do
+   in unionMount sources pats ignore var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -174,8 +89,8 @@ mount folder pats ignore var0 toAction' =
         chain :: [a -> a] -> a -> a
         chain = flip $ foldl' $ flip ($)
 
--- TODO: finalize and rename
-unionMount1 ::
+-- | Union mount a set of sources (directories) into a model.
+unionMount ::
   forall source tag model m.
   ( MonadIO m,
     MonadUnliftIO m,
@@ -189,11 +104,8 @@ unionMount1 ::
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount1 sources pats ignore model0 handleAction = do
-  -- This TMVar is used to ensure the LVar semantics that `set` is called once
-  -- /after/ the initial file listing is read, and `modify` is called for each
-  -- subsequent inotify events.
-  (x0, xf) <- unionMount sources pats ignore
+unionMount sources pats ignore model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats ignore
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -204,7 +116,7 @@ unionMount1 sources pats ignore model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount1 sources pats ignore model0 handleAction
+        (a, b) <- unionMount sources pats ignore model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -234,7 +146,8 @@ data Cmd
   = Cmd_Remount
   deriving (Eq, Show)
 
-unionMount ::
+-- | Like `unionMount` but without exception interrupting or re-mounting.
+unionMount' ::
   forall source tag m m1.
   ( MonadIO m,
     MonadUnliftIO m,
@@ -252,7 +165,7 @@ unionMount ::
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount sources pats ignore = do
+unionMount' sources pats ignore = do
   fmap fst . flip runStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
@@ -419,9 +332,7 @@ log :: MonadLogger m => LogLevel -> Text -> m ()
 log = logWithoutLoc "System.UnionMount"
 
 -- TODO: Abstract in module with StateT / MonadState
-newtype OverlayFs source = OverlayFs
-  { unOverlayFs :: Map FilePath (Set source)
-  }
+newtype OverlayFs source = OverlayFs (Map FilePath (Set source))
 
 -- TODO: Replace this with a function taking `NonEmpty source`
 emptyOverlayFs :: Ord source => OverlayFs source
