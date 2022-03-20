@@ -1,6 +1,6 @@
 cabal-version:      2.4
 name:               unionmount
-version:            0.1.0.0
+version:            0.2.0.0
 license:            MIT
 copyright:          2021 Sridhar Ratnakumar
 maintainer:         srid@srid.ca
@@ -9,14 +9,13 @@ category:           Filesystem
 
 -- TODO: Before hackage release.
 -- A short (one-line) description of the package.
-synopsis: Union mount filesystem paths into Haskell datastructures
+synopsis:           Union mount filesystem paths into Haskell datastructures
 
 -- A longer description of the package.
-description: Union mount filesystem paths into Haskell datastructures
+description:        Union mount filesystem paths into Haskell datastructures
 
 -- A URL where users can report bugs.
-bug-reports: https://github.com/srid/unionmount
-
+bug-reports:        https://github.com/srid/unionmount
 extra-source-files:
   LICENSE
   README.md
@@ -24,7 +23,7 @@ extra-source-files:
 library
   build-depends:
     , async
-    , base >=4.13.0.0 && <=4.17.0.0
+    , base          >=4.13.0.0 && <=4.17.0.0
     , bytestring
     , containers
     , data-default

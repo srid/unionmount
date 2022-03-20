@@ -11,8 +11,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ ];
-        pkgs =
-          import nixpkgs { inherit system overlays; config.allowBroken = true; };
+        pkgs = nixpkgs.legacyPackages.${system};
         project = returnShellEnv:
           pkgs.haskellPackages.developPackage {
             inherit returnShellEnv;
@@ -22,18 +21,19 @@
             overrides = self: super: with pkgs.haskell.lib; {
               # Use callCabal2nix to override Haskell dependencies here
               # cf. https://tek.brick.do/K3VXJd8mEKO7
+              relude = self.callHackage "relude" "1.0.0.1" { }; # Not on nixpkgs, for some reason.
             };
             modifier = drv:
-              pkgs.haskell.lib.addBuildTools drv (with pkgs.haskellPackages;
-              [
-                # Specify your build/dev dependencies here. 
-                cabal-fmt
-                cabal-install
-                ghcid
-                haskell-language-server
-                ormolu
-                pkgs.nixpkgs-fmt
-              ]);
+              pkgs.haskell.lib.addBuildTools drv (with pkgs.haskellPackages; pkgs.lib.lists.optional returnShellEnv
+                [
+                  # Specify your build/dev dependencies here. 
+                  cabal-fmt
+                  cabal-install
+                  ghcid
+                  haskell-language-server
+                  ormolu
+                  pkgs.nixpkgs-fmt
+                ]);
           };
       in
       {
