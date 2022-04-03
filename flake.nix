@@ -21,7 +21,7 @@
             overrides = self: super: with pkgs.haskell.lib; {
               # Use callCabal2nix to override Haskell dependencies here
               # cf. https://tek.brick.do/K3VXJd8mEKO7
-              relude = self.callHackage "relude" "1.0.0.1" { }; # Not on nixpkgs, for some reason.
+              relude = self.relude_1_0_0_1;
             };
             modifier = drv:
               pkgs.haskell.lib.addBuildTools drv (with pkgs.haskellPackages; pkgs.lib.lists.optional returnShellEnv
