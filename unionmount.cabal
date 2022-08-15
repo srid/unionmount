@@ -52,6 +52,7 @@ library
   default-extensions:
     FlexibleContexts
     FlexibleInstances
+    ImportQualifiedPost
     KindSignatures
     LambdaCase
     MultiParamTypeClasses
