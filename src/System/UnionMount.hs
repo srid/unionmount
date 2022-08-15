@@ -20,9 +20,9 @@ import Control.Monad.Logger
     MonadLogger,
     logWithoutLoc,
   )
-import qualified Data.LVar as LVar
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
+import Data.LVar qualified as LVar
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Time.Clock (NominalDiffTime)
 import System.Directory (canonicalizePath)
 import System.FSNotify
