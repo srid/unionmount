@@ -23,14 +23,12 @@ import Control.Monad.Logger
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Time.Clock (NominalDiffTime)
 import System.Directory (canonicalizePath)
 import System.FSNotify
   ( ActionPredicate,
-    Debounce (Debounce),
     Event (..),
+    EventIsDirectory (IsDirectory),
     StopListening,
-    WatchConfig (..),
     WatchManager,
     defaultConfig,
     eventIsDirectory,
@@ -79,7 +77,7 @@ mount folder pats ignore var0 toAction' =
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
     -- Monadic version of `chain`
-    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
+    chainM :: (Monad m) => (x -> m (a -> a)) -> [x] -> m (a -> a)
     chainM f =
       fmap chain . mapM f
       where
@@ -277,12 +275,7 @@ onChange ::
   -- ancestor is a symlink.
   m Cmd
 onChange q roots = do
-  -- 100ms is a reasonable wait period to gather (possibly related) events.
-  -- One such related event is a MOVE, which fsnotify doesn't native support;
-  -- and spits out a DELETE and ADD instead.
-  let debounceDurationSecs :: NominalDiffTime = 0.1
-      cfg = defaultConfig {confDebounce = Debounce debounceDurationSecs}
-  withManagerM cfg $ \mgr -> do
+  withManagerM $ \mgr -> do
     stops <- forM roots $ \(x, rootRel) -> do
       -- NOTE: It is important to use canonical path, because this will allow us to
       -- transform fsnotify event's (absolute) path into one that is relative to
@@ -291,15 +284,16 @@ onChange q roots = do
       log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
       watchTreeM mgr root (const True) $ \event -> do
         log LevelDebug $ show event
-        let rel = makeRelative root
-            f a fp act = atomically $ writeTBQueue q (a, fp, act)
-        if eventIsDirectory event
-          then f x (rel . eventPath $ event) $ Left $ FolderAction ()
+        let fp = makeRelative root $ eventPath event
+            f act = atomically $ writeTBQueue q (x, fp, act)
+        if eventIsDirectory event == IsDirectory
+          then f $ Left $ FolderAction ()
           else case event of
-            Added (rel -> fp) _ _ -> f x fp $ Right $ Refresh New ()
-            Modified (rel -> fp) _ _ -> f x fp $ Right $ Refresh Update ()
-            Removed (rel -> fp) _ _ -> f x fp $ Right Delete
-            Unknown (rel -> fp) _ _ -> f x fp $ Right Delete
+            Added {} -> f $ Right $ Refresh New ()
+            Modified {} -> f $ Right $ Refresh Update ()
+            ModifiedAttributes {} -> f $ Right $ Refresh Update ()
+            Removed {} -> f $ Right Delete
+            _ -> pure ()
     liftIO (threadDelay maxBound)
       `finally` do
         log LevelInfo "Stopping fsnotify monitor."
@@ -309,12 +303,11 @@ onChange q roots = do
 
 withManagerM ::
   (MonadIO m, MonadUnliftIO m) =>
-  WatchConfig ->
   (WatchManager -> m a) ->
   m a
-withManagerM cfg f = do
+withManagerM f = do
   withRunInIO $ \run ->
-    withManagerConf cfg $ \mgr -> run (f mgr)
+    withManagerConf defaultConfig $ \mgr -> run (f mgr)
 
 watchTreeM ::
   forall m.

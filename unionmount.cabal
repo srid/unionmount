@@ -23,14 +23,14 @@ extra-source-files:
 library
   build-depends:
     , async
-    , base          >=4.13.0.0 && <=4.17.0.0
+    , base          >=4.13.0 && <4.18
     , bytestring
     , containers
     , data-default
     , directory
     , filepath
     , filepattern
-    , fsnotify
+    , fsnotify      >=0.4.0  && <0.5
     , lvar
     , monad-logger
     , mtl
