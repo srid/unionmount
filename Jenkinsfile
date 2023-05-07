@@ -1,5 +1,7 @@
 pipeline {
-    agent any
+    agent {
+        label 'nixos'
+    }
     stages {
         stage ('Build') {
             steps {
