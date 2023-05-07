@@ -39,8 +39,8 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative)
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
-import UnliftIO.STM (TBQueue, readTBQueue)
+import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, unGetTBQueue, withRunInIO, writeTBQueue)
+import UnliftIO.STM (TBQueue, peekTBQueue, tryReadTBQueue)
 
 -- | Simplified version of `unionMount` with exactly one layer.
 mount ::
@@ -164,7 +164,7 @@ unionMount' ::
       m Cmd
     )
 unionMount' sources pats ignore = do
-  fmap fst . flip runStateT (emptyOverlayFs @source) $ do
+  flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
@@ -181,30 +181,38 @@ unionMount' sources pats ignore = do
           q :: TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO $ newTBQueueIO 1
           fmap (either id id) $
             race (onChange q (toList sources)) $
-              fmap fst . flip runStateT ofs $ do
-                let loop = do
-                      (src, fp, actE) <- atomically $ readTBQueue q
-                      let shouldIgnore = any (?== fp) ignore
-                      case actE of
-                        Left _ -> do
-                          let reason = "Unhandled folder event on '" <> toText fp <> "'"
-                          if shouldIgnore
-                            then do
-                              log LevelWarn $ reason <> " on an ignored path"
-                              loop
-                            else do
-                              -- We don't know yet how to deal with folder events. Just reboot the mount.
-                              log LevelWarn $ reason <> "; suggesting a re-mount"
-                              pure Cmd_Remount -- Exit, asking user to remokunt
-                        Right act -> do
-                          case guard (not shouldIgnore) >> getTag pats fp of
-                            Nothing -> loop
-                            Just tag -> do
-                              changes <- fmap snd . flip runStateT Map.empty $ do
-                                put =<< lift . changeInsert src tag fp act =<< get
-                              lift $ reportChange changes
-                              loop
-                loop
+              let readDebounced = do
+                    _ <- atomically $ peekTBQueue q
+                    -- Wait for some initial action in the queue.
+                    -- 100ms is a reasonable wait period to gather (possibly related) events.
+                    liftIO $ threadDelay 100000
+                    -- If after this period the queue is empty again, retry.
+                    -- (this can happen if a file is created and deleted in this short span)
+                    maybe readDebounced pure
+                      =<< atomically (tryReadTBQueue q)
+                  loop = do
+                    (src, fp, actE) <- readDebounced
+                    let shouldIgnore = any (?== fp) ignore
+                    case actE of
+                      Left _ -> do
+                        let reason = "Unhandled folder event on '" <> toText fp <> "'"
+                        if shouldIgnore
+                          then do
+                            log LevelWarn $ reason <> " on an ignored path"
+                            loop
+                          else do
+                            -- We don't know yet how to deal with folder events. Just reboot the mount.
+                            log LevelWarn $ reason <> "; suggesting a re-mount"
+                            pure Cmd_Remount -- Exit, asking user to remokunt
+                      Right act -> do
+                        case guard (not shouldIgnore) >> getTag pats fp of
+                          Nothing -> loop
+                          Just tag -> do
+                            changes <- fmap snd . flip runStateT Map.empty $ do
+                              put =<< lift . changeInsert src tag fp act =<< get
+                            lift $ reportChange changes
+                            loop
+               in evalStateT loop ofs
       )
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
@@ -268,7 +276,7 @@ refreshAction = \case
 
 onChange ::
   forall x m.
-  (MonadIO m, MonadLogger m, MonadUnliftIO m) =>
+  (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
   TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
   [(x, FilePath)] ->
   -- | The filepath is relative to the folder being monitored, unless if its
@@ -284,16 +292,32 @@ onChange q roots = do
       log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
       watchTreeM mgr root (const True) $ \event -> do
         log LevelDebug $ show event
-        let fp = makeRelative root $ eventPath event
-            f act = atomically $ writeTBQueue q (x, fp, act)
-        if eventIsDirectory event == IsDirectory
-          then f $ Left $ FolderAction ()
-          else case event of
-            Added {} -> f $ Right $ Refresh New ()
-            Modified {} -> f $ Right $ Refresh Update ()
-            ModifiedAttributes {} -> f $ Right $ Refresh Update ()
-            Removed {} -> f $ Right Delete
-            _ -> pure ()
+        atomically $ do
+          lastQ <- tryReadTBQueue q
+          let fp = makeRelative root $ eventPath event
+              f act = writeTBQueue q (x, fp, act)
+              reAddQ = forM_ lastQ (unGetTBQueue q)
+              -- Re-add last item to the queue
+          if eventIsDirectory event == IsDirectory
+            then f $ Left $ FolderAction ()
+            else do
+              let newAction = case event of
+                    Added {} -> Just $ Refresh New ()
+                    Modified {} -> Just $ Refresh Update ()
+                    ModifiedAttributes {} -> Just $ Refresh Update ()
+                    Removed {} -> Just Delete
+                    _ -> Nothing
+              -- Merge with the last action when it makes sense to do so.
+              case (lastQ, newAction) of
+                (_, Nothing) -> reAddQ
+                (Just (lastTag, lastFp, Right lastAction), Just a)
+                  | lastTag == x && lastFp == fp ->
+                      case (lastAction, a) of
+                        (Delete, Refresh New ()) -> f $ Right $ Refresh Update ()
+                        (Refresh New (), Refresh Update ()) -> f $ Right $ Refresh New ()
+                        (Refresh New (), Delete) -> pure ()
+                        _ -> f $ Right a
+                (_, Just a) -> reAddQ >> f (Right a)
     liftIO (threadDelay maxBound)
       `finally` do
         log LevelInfo "Stopping fsnotify monitor."
