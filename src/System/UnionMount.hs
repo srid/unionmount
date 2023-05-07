@@ -39,8 +39,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative)
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, unGetTBQueue, withRunInIO, writeTBQueue)
-import UnliftIO.STM (TBQueue, peekTBQueue, tryReadTBQueue)
+import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
 mount ::
@@ -178,18 +177,18 @@ unionMount' sources pats ignore = do
       ( changes0,
         \reportChange -> do
           -- Run fsnotify on sources
-          q :: TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO $ newTBQueueIO 1
+          q :: TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
           fmap (either id id) $
             race (onChange q (toList sources)) $
               let readDebounced = do
-                    _ <- atomically $ peekTBQueue q
                     -- Wait for some initial action in the queue.
+                    _ <- atomically $ readTMVar q
                     -- 100ms is a reasonable wait period to gather (possibly related) events.
                     liftIO $ threadDelay 100000
                     -- If after this period the queue is empty again, retry.
                     -- (this can happen if a file is created and deleted in this short span)
                     maybe readDebounced pure
-                      =<< atomically (tryReadTBQueue q)
+                      =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, fp, actE) <- readDebounced
                     let shouldIgnore = any (?== fp) ignore
@@ -277,7 +276,7 @@ refreshAction = \case
 onChange ::
   forall x m.
   (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
-  TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
+  TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
   [(x, FilePath)] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
@@ -293,11 +292,11 @@ onChange q roots = do
       watchTreeM mgr root (const True) $ \event -> do
         log LevelDebug $ show event
         atomically $ do
-          lastQ <- tryReadTBQueue q
+          lastQ <- tryTakeTMVar q
           let fp = makeRelative root $ eventPath event
-              f act = writeTBQueue q (x, fp, act)
-              reAddQ = forM_ lastQ (unGetTBQueue q)
+              f act = putTMVar q (x, fp, act)
               -- Re-add last item to the queue
+              reAddQ = forM_ lastQ (putTMVar q)
           if eventIsDirectory event == IsDirectory
             then f $ Left $ FolderAction ()
             else do
