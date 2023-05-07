@@ -230,8 +230,8 @@ getTag :: [(b, FilePattern)] -> FilePath -> Maybe b
 getTag pats fp =
   let pull patterns =
         listToMaybe $
-          flip mapMaybe patterns $ \(tag, pattern) -> do
-            guard $ pattern ?== fp
+          flip mapMaybe patterns $ \(tag, pat) -> do
+            guard $ pat ?== fp
             pure tag
    in if isRelative fp
         then pull pats
