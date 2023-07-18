@@ -5,7 +5,7 @@ pipeline {
     stages {
         stage ('Build') {
             steps {
-                nixBuildAll ()
+                nixCI ()
             }
         }
     }
