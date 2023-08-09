@@ -21,6 +21,13 @@
           devShell.tools = hp: {
             treefmt = config.treefmt.build.wrapper;
           } // config.treefmt.build.programs;
+          packages = {
+            fsnotify.source = "0.4.1.0"; # Not in nixpkgs, yet.
+            ghcid.source = "0.8.8"; # For fsnotify dep
+          };
+          settings = {
+            fsnotify.check = false;
+          };
         };
 
         packages.default = self'.packages.unionmount;

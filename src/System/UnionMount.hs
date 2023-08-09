@@ -23,14 +23,12 @@ import Control.Monad.Logger
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Time.Clock (NominalDiffTime)
 import System.Directory (canonicalizePath)
 import System.FSNotify
   ( ActionPredicate,
-    Debounce (Debounce),
     Event (..),
+    EventIsDirectory (IsDirectory),
     StopListening,
-    WatchConfig (..),
     WatchManager,
     defaultConfig,
     eventIsDirectory,
@@ -41,8 +39,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative)
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, newTBQueueIO, race, try, withRunInIO, writeTBQueue)
-import UnliftIO.STM (TBQueue, readTBQueue)
+import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
 mount ::
@@ -79,7 +76,7 @@ mount folder pats ignore var0 toAction' =
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
     -- Monadic version of `chain`
-    chainM :: Monad m => (x -> m (a -> a)) -> [x] -> m (a -> a)
+    chainM :: (Monad m) => (x -> m (a -> a)) -> [x] -> m (a -> a)
     chainM f =
       fmap chain . mapM f
       where
@@ -166,7 +163,7 @@ unionMount' ::
       m Cmd
     )
 unionMount' sources pats ignore = do
-  fmap fst . flip runStateT (emptyOverlayFs @source) $ do
+  flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
@@ -180,33 +177,41 @@ unionMount' sources pats ignore = do
       ( changes0,
         \reportChange -> do
           -- Run fsnotify on sources
-          q :: TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO $ newTBQueueIO 1
+          q :: TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
           fmap (either id id) $
             race (onChange q (toList sources)) $
-              fmap fst . flip runStateT ofs $ do
-                let loop = do
-                      (src, fp, actE) <- atomically $ readTBQueue q
-                      let shouldIgnore = any (?== fp) ignore
-                      case actE of
-                        Left _ -> do
-                          let reason = "Unhandled folder event on '" <> toText fp <> "'"
-                          if shouldIgnore
-                            then do
-                              log LevelWarn $ reason <> " on an ignored path"
-                              loop
-                            else do
-                              -- We don't know yet how to deal with folder events. Just reboot the mount.
-                              log LevelWarn $ reason <> "; suggesting a re-mount"
-                              pure Cmd_Remount -- Exit, asking user to remokunt
-                        Right act -> do
-                          case guard (not shouldIgnore) >> getTag pats fp of
-                            Nothing -> loop
-                            Just tag -> do
-                              changes <- fmap snd . flip runStateT Map.empty $ do
-                                put =<< lift . changeInsert src tag fp act =<< get
-                              lift $ reportChange changes
-                              loop
-                loop
+              let readDebounced = do
+                    -- Wait for some initial action in the queue.
+                    _ <- atomically $ readTMVar q
+                    -- 100ms is a reasonable wait period to gather (possibly related) events.
+                    liftIO $ threadDelay 100000
+                    -- If after this period the queue is empty again, retry.
+                    -- (this can happen if a file is created and deleted in this short span)
+                    maybe readDebounced pure
+                      =<< atomically (tryTakeTMVar q)
+                  loop = do
+                    (src, fp, actE) <- readDebounced
+                    let shouldIgnore = any (?== fp) ignore
+                    case actE of
+                      Left _ -> do
+                        let reason = "Unhandled folder event on '" <> toText fp <> "'"
+                        if shouldIgnore
+                          then do
+                            log LevelWarn $ reason <> " on an ignored path"
+                            loop
+                          else do
+                            -- We don't know yet how to deal with folder events. Just reboot the mount.
+                            log LevelWarn $ reason <> "; suggesting a re-mount"
+                            pure Cmd_Remount -- Exit, asking user to remokunt
+                      Right act -> do
+                        case guard (not shouldIgnore) >> getTag pats fp of
+                          Nothing -> loop
+                          Just tag -> do
+                            changes <- fmap snd . flip runStateT Map.empty $ do
+                              put =<< lift . changeInsert src tag fp act =<< get
+                            lift $ reportChange changes
+                            loop
+               in evalStateT loop ofs
       )
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
@@ -270,19 +275,14 @@ refreshAction = \case
 
 onChange ::
   forall x m.
-  (MonadIO m, MonadLogger m, MonadUnliftIO m) =>
-  TBQueue (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
+  (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
+  TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
   [(x, FilePath)] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
   m Cmd
 onChange q roots = do
-  -- 100ms is a reasonable wait period to gather (possibly related) events.
-  -- One such related event is a MOVE, which fsnotify doesn't native support;
-  -- and spits out a DELETE and ADD instead.
-  let debounceDurationSecs :: NominalDiffTime = 0.1
-      cfg = defaultConfig {confDebounce = Debounce debounceDurationSecs}
-  withManagerM cfg $ \mgr -> do
+  withManagerM $ \mgr -> do
     stops <- forM roots $ \(x, rootRel) -> do
       -- NOTE: It is important to use canonical path, because this will allow us to
       -- transform fsnotify event's (absolute) path into one that is relative to
@@ -291,15 +291,32 @@ onChange q roots = do
       log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
       watchTreeM mgr root (const True) $ \event -> do
         log LevelDebug $ show event
-        let rel = makeRelative root
-            f a fp act = atomically $ writeTBQueue q (a, fp, act)
-        if eventIsDirectory event
-          then f x (rel . eventPath $ event) $ Left $ FolderAction ()
-          else case event of
-            Added (rel -> fp) _ _ -> f x fp $ Right $ Refresh New ()
-            Modified (rel -> fp) _ _ -> f x fp $ Right $ Refresh Update ()
-            Removed (rel -> fp) _ _ -> f x fp $ Right Delete
-            Unknown (rel -> fp) _ _ -> f x fp $ Right Delete
+        atomically $ do
+          lastQ <- tryTakeTMVar q
+          let fp = makeRelative root $ eventPath event
+              f act = putTMVar q (x, fp, act)
+              -- Re-add last item to the queue
+              reAddQ = forM_ lastQ (putTMVar q)
+          if eventIsDirectory event == IsDirectory
+            then f $ Left $ FolderAction ()
+            else do
+              let newAction = case event of
+                    Added {} -> Just $ Refresh New ()
+                    Modified {} -> Just $ Refresh Update ()
+                    ModifiedAttributes {} -> Just $ Refresh Update ()
+                    Removed {} -> Just Delete
+                    _ -> Nothing
+              -- Merge with the last action when it makes sense to do so.
+              case (lastQ, newAction) of
+                (_, Nothing) -> reAddQ
+                (Just (lastTag, lastFp, Right lastAction), Just a)
+                  | lastTag == x && lastFp == fp ->
+                      case (lastAction, a) of
+                        (Delete, Refresh New ()) -> f $ Right $ Refresh Update ()
+                        (Refresh New (), Refresh Update ()) -> f $ Right $ Refresh New ()
+                        (Refresh New (), Delete) -> pure ()
+                        _ -> f $ Right a
+                (_, Just a) -> reAddQ >> f (Right a)
     liftIO (threadDelay maxBound)
       `finally` do
         log LevelInfo "Stopping fsnotify monitor."
@@ -309,12 +326,11 @@ onChange q roots = do
 
 withManagerM ::
   (MonadIO m, MonadUnliftIO m) =>
-  WatchConfig ->
   (WatchManager -> m a) ->
   m a
-withManagerM cfg f = do
+withManagerM f = do
   withRunInIO $ \run ->
-    withManagerConf cfg $ \mgr -> run (f mgr)
+    withManagerConf defaultConfig $ \mgr -> run (f mgr)
 
 watchTreeM ::
   forall m.
