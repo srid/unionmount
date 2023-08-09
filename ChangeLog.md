@@ -1,5 +1,5 @@
 
-## 0.2.1.0
+## 0.2.2.0
 
 - Now requires fsnotify >= 0.4
   - Write a simple debouncer for files (fsnotify's debouncer was removed upstream). This is better than the removed upstream debouncer because it works like the proposed state machine. 
