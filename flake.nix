@@ -21,13 +21,6 @@
           devShell.tools = hp: {
             treefmt = config.treefmt.build.wrapper;
           } // config.treefmt.build.programs;
-          packages = {
-            fsnotify.source = "0.4.1.0"; # Not in nixpkgs, yet.
-            ghcid.source = "0.8.8"; # For fsnotify dep
-          };
-          settings = {
-            fsnotify.check = false;
-          };
         };
 
         packages.default = self'.packages.unionmount;
@@ -35,7 +28,6 @@
         treefmt.config = {
           inherit (config.flake-root) projectRootFile;
           package = pkgs.treefmt;
-          flakeFormatter = false; # For https://github.com/numtide/treefmt-nix/issues/55
 
           programs.ormolu.enable = true;
           programs.nixpkgs-fmt.enable = true;
