@@ -344,14 +344,14 @@ watchTreeM wm fp pr f =
   withRunInIO $ \run ->
     watchTree wm fp pr $ \evt -> run (f evt)
 
-log :: MonadLogger m => LogLevel -> Text -> m ()
+log :: (MonadLogger m) => LogLevel -> Text -> m ()
 log = logWithoutLoc "System.UnionMount"
 
 -- TODO: Abstract in module with StateT / MonadState
 newtype OverlayFs source = OverlayFs (Map FilePath (Set (source, FilePath)))
 
 -- TODO: Replace this with a function taking `NonEmpty source`
-emptyOverlayFs :: Ord source => OverlayFs source
+emptyOverlayFs :: (Ord source) => OverlayFs source
 emptyOverlayFs = OverlayFs mempty
 
 overlayFsModify :: FilePath -> (Set (src, FilePath) -> Set (src, FilePath)) -> OverlayFs src -> OverlayFs src
@@ -359,11 +359,11 @@ overlayFsModify k f (OverlayFs m) =
   OverlayFs $
     Map.insert k (f $ fromMaybe Set.empty $ Map.lookup k m) m
 
-overlayFsAdd :: Ord src => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
+overlayFsAdd :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
 overlayFsAdd fp src =
   overlayFsModify fp $ Set.insert src
 
-overlayFsRemove :: Ord src => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
+overlayFsRemove :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
 overlayFsRemove fp src =
   overlayFsModify fp $ Set.delete src
 
