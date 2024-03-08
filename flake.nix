@@ -40,13 +40,13 @@
 
         devShells.default = pkgs.mkShell {
           name = "unionmount";
-          meta.description = "Haskell development environment";
+          meta.description = "unionmount development environment";
           # See https://community.flake.parts/haskell-flake/devshell#composing-devshells
           inputsFrom = [
             config.haskellProjects.default.outputs.devShell
             config.treefmt.build.devShell
           ];
-          nativeBuildInputs = with pkgs; [
+          packages = with pkgs; [
             just
           ];
         };
