@@ -10,7 +10,6 @@ import UnliftIO.Concurrent (threadDelay)
 import UnliftIO.STM (writeTMVar)
 import UnliftIO.Temporary (withSystemTempDirectory)
 
--- TODO: Write tests: https://github.com/srid/unionmount/issues/5
 spec :: Spec
 spec = do
   describe "unionmount" $ do
