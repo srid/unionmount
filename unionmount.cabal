@@ -79,6 +79,8 @@ test-suite test
   main-is:        Spec.hs
   build-depends:
     , hspec
+    , monad-logger
+    , monad-logger-extras
     , relude
 
   if flag(ghcid)
