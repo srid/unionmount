@@ -5,7 +5,6 @@
     haskell-flake.url = "github:srid/haskell-flake";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
-    flake-root.url = "github:srid/flake-root";
   };
   outputs = inputs@{ nixpkgs, flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
@@ -13,25 +12,20 @@
       imports = [
         inputs.haskell-flake.flakeModule
         inputs.treefmt-nix.flakeModule
-        inputs.flake-root.flakeModule
       ];
 
       perSystem = { config, self', pkgs, ... }: {
         haskellProjects.default = {
-          devShell.tools = hp: {
-            treefmt = config.treefmt.build.wrapper;
-          } // config.treefmt.build.programs;
+          autoWire = [ "packages" "apps" "checks" ]; # Wire all but the devShell
         };
 
-        packages.default = self'.packages.unionmount;
-
         treefmt.config = {
-          inherit (config.flake-root) projectRootFile;
+          projectRootFile = "flake.nix";
           package = pkgs.treefmt;
 
           programs.ormolu.enable = true;
           programs.nixpkgs-fmt.enable = true;
-          # programs.cabal-fmt.enable = true; (Problematic now)
+          programs.cabal-fmt.enable = true;
 
           # We use fourmolu
           settings.formatter.ormolu = {
@@ -40,6 +34,21 @@
               "-XImportQualifiedPost"
             ];
           };
+        };
+
+        packages.default = self'.packages.unionmount;
+
+        devShells.default = pkgs.mkShell {
+          name = "unionmount";
+          meta.description = "unionmount development environment";
+          # See https://community.flake.parts/haskell-flake/devshell#composing-devshells
+          inputsFrom = [
+            config.haskellProjects.default.outputs.devShell
+            config.treefmt.build.devShell
+          ];
+          packages = with pkgs; [
+            just
+          ];
         };
       };
     };
