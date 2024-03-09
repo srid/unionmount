@@ -3,14 +3,15 @@
 
 module System.UnionMountSpec where
 
-import Control.Monad.Logger.Extras (logToStderr, runLoggerLoggingT)
+import Control.Monad.Logger.Extras (logToNowhere, runLoggerLoggingT)
 import Data.LVar qualified as LVar
-import Data.List (stripPrefix, union)
+import Data.List (stripPrefix)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Traversable (for)
 import Relude.Unsafe qualified as Unsafe
+import System.Directory (createDirectory)
 import System.Directory.Recursive (getFilesRecursive)
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern)
@@ -72,6 +73,27 @@ spec = do
                      writeFile "file3" "file3 is in first layer"
                  )
              ]
+    it "mount point layers" $ do
+      unionMountSpec $
+        FolderMutation
+          Nothing
+          ( do
+              writeFile "file1" "hello"
+              writeFile "file3" "hello"
+          )
+          ( do
+              writeFile "file1" "hello, again"
+          )
+          :| [ FolderMutation
+                 (Just "foo")
+                 ( do
+                     writeFile "file2" "another file"
+                 )
+                 ( do
+                     writeFile "file2" "another file, again"
+                     writeFile "file3" "file3 is in first layer"
+                 )
+             ]
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -84,7 +106,7 @@ unionMountSpec ::
 unionMountSpec folders = do
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
-    flip runLoggerLoggingT logToStderr $ do
+    flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
       (model0, patch) <- UM.unionMount layers allFiles ignoreNone mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
@@ -130,8 +152,15 @@ runFolderMutation :: FolderMutation -> IO (Map.Map FilePath ByteString)
 runFolderMutation folder = do
   withSystemTempDirectory "runFolderMutation" $ \tempDir -> do
     withCurrentDirectory tempDir $ do
-      _folderMutationInit folder
-      _folderMutationUpdate folder
+      let withMountPointIfAny = case _folderMountPoint folder of
+            Nothing -> id
+            Just subdir -> \f -> do
+              -- Create the mount point
+              _ <- createDirectory subdir
+              withCurrentDirectory subdir f
+      withMountPointIfAny $ do
+        _folderMutationInit folder
+        _folderMutationUpdate folder
       files <- getFilesRecursiveCurrentDir
       Map.fromList <$> forM files (\f -> (f,) <$> readFileBS f)
   where
