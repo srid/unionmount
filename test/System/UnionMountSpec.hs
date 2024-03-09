@@ -5,8 +5,10 @@ module System.UnionMountSpec where
 
 import Control.Monad.Logger.Extras (logToStderr, runLoggerLoggingT)
 import Data.LVar qualified as LVar
+import Data.List (stripPrefix)
 import Data.Map.Strict qualified as Map
 import Relude.Unsafe qualified as Unsafe
+import System.Directory.Recursive (getFilesRecursive)
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern)
 import System.UnionMount qualified as UM
@@ -30,10 +32,6 @@ spec = do
               writeFile "file1" "hello, again"
               writeFile "file2" "another file"
           )
-        $ Map.fromList
-          [ ("file1", "hello, again"),
-            ("file2", "another file")
-          ]
     it "deletion" $ do
       unionMountSpec
         "basic"
@@ -46,19 +44,32 @@ spec = do
               writeFile "file1" "hello, again"
               removeFile "file2"
           )
-        $ Map.fromList
-          [ ("file1", "hello, again")
-          ]
 
--- | Spec for a folder that changes over time.
+-- | Represent the mutation of a folder over time.
+--
+-- Initial state of the folder, along with the mutations to perform, both as IO
+-- actions.
 data FolderMutation = FolderMutation
   { -- | How to initialize the folder
     _folderMutationInit :: IO (),
     -- | IO operations to perform for updating the folder
-    _folderMutationUpdate :: IO (),
-    -- | Final expected filesystem tree after the update
-    _folderMutationExpected :: Map.Map FilePath ByteString
+    _folderMutationUpdate :: IO ()
   }
+
+runFolderMutation :: FolderMutation -> IO (Map.Map FilePath ByteString)
+runFolderMutation folder = do
+  withSystemTempDirectory "runFolderMutation" $ \tempDir -> do
+    withCurrentDirectory tempDir $ do
+      _folderMutationInit folder
+      _folderMutationUpdate folder
+      files <- getFilesRecursiveCurrentDir
+      Map.fromList <$> forM files (\f -> (f,) <$> readFileBS f)
+  where
+    getFilesRecursiveCurrentDir :: IO [FilePath]
+    getFilesRecursiveCurrentDir = do
+      fs <- getFilesRecursive "."
+      -- Remove the leading "./" from the file paths
+      pure $ fs <&> \f -> fromMaybe f $ stripPrefix "./" f
 
 -- | Test `UM.mount` using a set of IO operations, and checking the final result.
 unionMountSpec ::
@@ -92,7 +103,8 @@ unionMountSpec name folder = do
             threadDelay 500_000 -- Wait for fsnotify to handle events
         )
     finalModel <- LVar.get model
-    finalModel `shouldBe` _folderMutationExpected folder
+    expected <- runFolderMutation folder
+    finalModel `shouldBe` expected
 
 allFiles :: [((), FilePattern)]
 allFiles = [((), "*")]
