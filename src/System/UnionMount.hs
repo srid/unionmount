@@ -11,6 +11,9 @@ module System.UnionMount
     FileAction (..),
     RefreshAction (..),
     Change,
+
+    -- * For tests
+    chainM,
   )
 where
 
@@ -75,16 +78,17 @@ mount folder pats ignore var0 toAction' =
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
-    -- Monadic version of `chain`
-    chainM :: (Monad m) => (x -> m (a -> a)) -> [x] -> m (a -> a)
-    chainM f =
-      fmap chain . mapM f
-      where
-        -- Apply the list of actions in the given order to an initial argument.
-        --
-        -- chain [f1, f2, ...] a = ... (f2 (f1 x))
-        chain :: [a -> a] -> a -> a
-        chain = flip $ foldl' $ flip ($)
+
+-- Monadic version of `chain`
+chainM :: (Monad m) => (x -> m (a -> a)) -> [x] -> m (a -> a)
+chainM f =
+  fmap chain . mapM f
+  where
+    -- Apply the list of actions in the given order to an initial argument.
+    --
+    -- chain [f1, f2, ...] a = ... (f2 (f1 x))
+    chain :: [a -> a] -> a -> a
+    chain = flip $ foldl' $ flip ($)
 
 -- | Union mount a set of sources (directories) into a model.
 unionMount ::
