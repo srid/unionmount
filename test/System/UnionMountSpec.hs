@@ -55,12 +55,10 @@ spec = do
 -- (outside of unionmount).
 unionMountSpec ::
   -- | The folder mutations to test
-  NonEmpty FolderMutation ->
+  UnionFolderMutations ->
   Expectation
 unionMountSpec folders = do
-  withSystemTempDirectories folders $ \tempDirs -> do
-    forM_ tempDirs $ \(folder, tempDir) ->
-      liftIO $ withCurrentDirectory tempDir $ _folderMutationInit folder
+  withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
     flip runLoggerLoggingT logToStderr $ do
       let layers = Set.fromList $ toList tempDirs <&> \(_, path) -> (path, path)
@@ -76,16 +74,19 @@ unionMountSpec folders = do
       LVar.set model model0
       race_
         (patch $ LVar.set model)
-        ( do
-            -- NOTE: These timings may not be enough on a slow system.
-            threadDelay 500_000 -- Wait for the initial model to be loaded.
-            forM_ tempDirs $ \(folder, tempDir) ->
-              liftIO $ withCurrentDirectory tempDir $ _folderMutationUpdate folder
-            threadDelay 500_000 -- Wait for fsnotify to handle events
-        )
+        (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
     finalModel <- LVar.get model
-    expected <- Map.unionsWith (<>) . fmap (Map.map one) <$> traverse runFolderMutation folders
+    expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected
+  where
+    -- NOTE: These timings may not be enough on a slow system.
+    withPaddedThreadDelay :: (MonadUnliftIO m) => Int -> m () -> m ()
+    withPaddedThreadDelay padding action = do
+      -- Wait for the initial model to be loaded.
+      threadDelay padding
+      action
+      -- Wait for fsnotify to handle events
+      threadDelay padding
 
 -- | Represent the mutation of a folder over time.
 --
@@ -112,6 +113,37 @@ runFolderMutation folder = do
       fs <- getFilesRecursive "."
       -- Remove the leading "./" from the file paths
       pure $ fs <&> \f -> fromMaybe f $ stripPrefix "./" f
+
+-- | A non-empty list of folder mutations that are meant to be unioned together.
+type UnionFolderMutations = NonEmpty FolderMutation
+
+runUnionFolderMutations :: UnionFolderMutations -> IO (Map.Map FilePath (NonEmpty ByteString))
+runUnionFolderMutations folders =
+  Map.unionsWith (<>) . fmap (Map.map one) <$> traverse runFolderMutation folders
+
+-- | Create a temp directory for each folder in the list, and call the handler.
+--
+-- Also initialize each folders. Use `updateUnionFolderMutations` to update the
+-- folders. And `runUnionFolderMutations` to get the final state of the folders,
+-- with values unioned as lists.
+withUnionFolderMutations ::
+  (MonadUnliftIO m) =>
+  UnionFolderMutations ->
+  (NonEmpty (FolderMutation, FilePath) -> m a) ->
+  m a
+withUnionFolderMutations folders f = do
+  withSystemTempDirectories folders $ \tempDirs -> do
+    forM_ tempDirs $ \(folder, tempDir) ->
+      liftIO $ withCurrentDirectory tempDir $ _folderMutationInit folder
+    f tempDirs
+
+updateUnionFolderMutations ::
+  (MonadUnliftIO m) =>
+  NonEmpty (FolderMutation, FilePath) ->
+  m ()
+updateUnionFolderMutations tempDirs = do
+  forM_ tempDirs $ \(folder, tempDir) ->
+    liftIO $ withCurrentDirectory tempDir $ _folderMutationUpdate folder
 
 -- | Like `withSystemTempDirectory`, but for multiple temp directories.
 withSystemTempDirectories ::
