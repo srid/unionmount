@@ -1,4 +1,8 @@
 
+## Unreleased (0.3.0.0)
+
+- Support for custom mount points (#6)
+
 ## 0.2.2.0
 
 - Now requires fsnotify >= 0.4

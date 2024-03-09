@@ -39,7 +39,7 @@ import System.FSNotify
     watchTree,
     withManagerConf,
   )
-import System.FilePath (isRelative, makeRelative)
+import System.FilePath (isRelative, makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
@@ -73,7 +73,7 @@ mount ::
   m (model, (model -> m ()) -> m ())
 mount folder pats ignore var0 toAction' =
   let tag0 = ()
-      sources = one (tag0, folder)
+      sources = one (tag0, (folder, Nothing))
    in unionMount sources pats ignore var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
@@ -99,7 +99,7 @@ unionMount ::
     Ord source,
     Ord tag
   ) =>
-  Set (source, FilePath) ->
+  Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
   model ->
@@ -158,7 +158,7 @@ unionMount' ::
     Ord source,
     Ord tag
   ) =>
-  Set (source, FilePath) ->
+  Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
   m1
@@ -171,17 +171,17 @@ unionMount' sources pats ignore = do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
-        forM_ sources $ \(src, folder) -> do
+        forM_ sources $ \(src, (folder, mountPoint)) -> do
           taggedFiles <- filesMatchingWithTag folder pats ignore
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
-              put =<< lift . changeInsert src tag fp (Refresh Existing ()) =<< get
+              put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
     ofs <- get
     pure
       ( changes0,
         \reportChange -> do
           -- Run fsnotify on sources
-          q :: TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
+          q :: TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
           fmap (either id id) $
             race (onChange q (toList sources)) $
               let readDebounced = do
@@ -194,7 +194,7 @@ unionMount' sources pats ignore = do
                     maybe readDebounced pure
                       =<< atomically (tryTakeTMVar q)
                   loop = do
-                    (src, fp, actE) <- readDebounced
+                    (src, mountPoint, fp, actE) <- readDebounced
                     let shouldIgnore = any (?== fp) ignore
                     case actE of
                       Left _ -> do
@@ -212,7 +212,7 @@ unionMount' sources pats ignore = do
                           Nothing -> loop
                           Just tag -> do
                             changes <- fmap snd . flip runStateT Map.empty $ do
-                              put =<< lift . changeInsert src tag fp act =<< get
+                              put =<< lift . changeInsert src tag mountPoint fp act =<< get
                             lift $ reportChange changes
                             loop
                in evalStateT loop ofs
@@ -280,14 +280,14 @@ refreshAction = \case
 onChange ::
   forall x m.
   (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
-  TMVar (x, FilePath, Either (FolderAction ()) (FileAction ())) ->
-  [(x, FilePath)] ->
+  TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) ->
+  [(x, (FilePath, Maybe FilePath))] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
   m Cmd
 onChange q roots = do
   withManagerM $ \mgr -> do
-    stops <- forM roots $ \(x, rootRel) -> do
+    stops <- forM roots $ \(x, (rootRel, mountPoint)) -> do
       -- NOTE: It is important to use canonical path, because this will allow us to
       -- transform fsnotify event's (absolute) path into one that is relative to
       -- @parent'@ (as passed by user), which is what @f@ will expect.
@@ -298,7 +298,7 @@ onChange q roots = do
         atomically $ do
           lastQ <- tryTakeTMVar q
           let fp = makeRelative root $ eventPath event
-              f act = putTMVar q (x, fp, act)
+              f act = putTMVar q (x, mountPoint, fp, act)
               -- Re-add last item to the queue
               reAddQ = forM_ lastQ (putTMVar q)
           if eventIsDirectory event == IsDirectory
@@ -313,7 +313,7 @@ onChange q roots = do
               -- Merge with the last action when it makes sense to do so.
               case (lastQ, newAction) of
                 (_, Nothing) -> reAddQ
-                (Just (lastTag, lastFp, Right lastAction), Just a)
+                (Just (lastTag, _lastMountPoint, lastFp, Right lastAction), Just a)
                   | lastTag == x && lastFp == fp ->
                       case (lastAction, a) of
                         (Delete, Refresh New ()) -> f $ Right $ Refresh Update ()
@@ -352,26 +352,26 @@ log :: (MonadLogger m) => LogLevel -> Text -> m ()
 log = logWithoutLoc "System.UnionMount"
 
 -- TODO: Abstract in module with StateT / MonadState
-newtype OverlayFs source = OverlayFs (Map FilePath (Set source))
+newtype OverlayFs source = OverlayFs (Map FilePath (Set (source, FilePath)))
 
 -- TODO: Replace this with a function taking `NonEmpty source`
 emptyOverlayFs :: (Ord source) => OverlayFs source
 emptyOverlayFs = OverlayFs mempty
 
-overlayFsModify :: FilePath -> (Set src -> Set src) -> OverlayFs src -> OverlayFs src
+overlayFsModify :: FilePath -> (Set (src, FilePath) -> Set (src, FilePath)) -> OverlayFs src -> OverlayFs src
 overlayFsModify k f (OverlayFs m) =
   OverlayFs $
     Map.insert k (f $ fromMaybe Set.empty $ Map.lookup k m) m
 
-overlayFsAdd :: (Ord src) => FilePath -> src -> OverlayFs src -> OverlayFs src
+overlayFsAdd :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
 overlayFsAdd fp src =
   overlayFsModify fp $ Set.insert src
 
-overlayFsRemove :: (Ord src) => FilePath -> src -> OverlayFs src -> OverlayFs src
+overlayFsRemove :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
 overlayFsRemove fp src =
   overlayFsModify fp $ Set.delete src
 
-overlayFsLookup :: FilePath -> OverlayFs source -> Maybe (NonEmpty (source, FilePath))
+overlayFsLookup :: FilePath -> OverlayFs source -> Maybe (NonEmpty ((source, FilePath), FilePath))
 overlayFsLookup fp (OverlayFs m) = do
   sources <- nonEmpty . toList =<< Map.lookup fp m
   pure $ sources <&> (,fp)
@@ -386,29 +386,31 @@ changeInsert ::
   (Ord source, Ord tag, MonadState (OverlayFs source) m) =>
   source ->
   tag ->
+  Maybe FilePath ->
   FilePath ->
   FileAction () ->
   Change source tag ->
   m (Change source tag)
-changeInsert src tag fp act ch = do
+changeInsert src tag mountPoint fp act ch = do
+  let fpMounted = maybe fp (</> fp) mountPoint
   fmap snd . flip runStateT ch $ do
     -- First, register this change in the overlayFs
     lift $
       modify $
         (if act == Delete then overlayFsRemove else overlayFsAdd)
-          fp
-          src
-    overlays <-
-      lift (gets $ overlayFsLookup fp) <&> \case
+          fpMounted
+          (src, fp)
+    overlays :: FileAction (NonEmpty (source, FilePath)) <-
+      lift (gets $ overlayFsLookup fpMounted) <&> \case
         Nothing -> Delete
         Just fs ->
           -- We don't track per-source action (not ideal), so use 'Existing'
           -- only if the current action is 'Deleted'. In every other scenario,
           -- re-use the current action for all overlay files.
           let combinedAction = fromMaybe Existing $ refreshAction act
-           in Refresh combinedAction fs
+           in Refresh combinedAction $ fs <&> \((src', fp'), _) -> (src', fp')
     gets (Map.lookup tag) >>= \case
       Nothing ->
-        modify $ Map.insert tag $ Map.singleton fp overlays
+        modify $ Map.insert tag $ Map.singleton fpMounted overlays
       Just files ->
-        modify $ Map.insert tag $ Map.insert fp overlays files
+        modify $ Map.insert tag $ Map.insert fpMounted overlays files
