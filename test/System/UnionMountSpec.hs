@@ -30,6 +30,7 @@ spec = do
       unionMountSpec $
         one $
           FolderMutation
+            Nothing
             ( do
                 writeFile "file1" "hello"
             )
@@ -41,6 +42,7 @@ spec = do
       unionMountSpec $
         one $
           FolderMutation
+            Nothing
             ( do
                 writeFile "file1" "hello"
                 writeFile "file2" "another file"
@@ -52,6 +54,7 @@ spec = do
     it "multiple layers" $ do
       unionMountSpec $
         FolderMutation
+          Nothing
           ( do
               writeFile "file1" "hello"
               writeFile "file3" "hello"
@@ -60,6 +63,7 @@ spec = do
               writeFile "file1" "hello, again"
           )
           :| [ FolderMutation
+                 Nothing
                  ( do
                      writeFile "file2" "another file"
                  )
@@ -81,7 +85,7 @@ unionMountSpec folders = do
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
     flip runLoggerLoggingT logToStderr $ do
-      let layers = Set.fromList $ toList tempDirs <&> \(_, path) -> (path, path)
+      let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
       (model0, patch) <- UM.unionMount layers allFiles ignoreNone mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
@@ -114,7 +118,9 @@ unionMountSpec folders = do
 -- Initial state of the folder, along with the mutations to perform, both as IO
 -- actions.
 data FolderMutation = FolderMutation
-  { -- | How to initialize the folder
+  { -- Mount point: the subfolder in which files must be shifted.
+    _folderMountPoint :: Maybe FilePath,
+    -- | How to initialize the folder
     _folderMutationInit :: IO (),
     -- | IO operations to perform for updating the folder
     _folderMutationUpdate :: IO ()
