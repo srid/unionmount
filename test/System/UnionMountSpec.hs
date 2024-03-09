@@ -12,15 +12,15 @@ import System.UnionMount qualified as UM
 import Test.Hspec
 import UnliftIO.Async (race_)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.Directory (withCurrentDirectory)
+import UnliftIO.Directory (removeFile, withCurrentDirectory)
 import UnliftIO.Temporary (withSystemTempDirectory)
 
 spec :: Spec
 spec = do
   describe "unionmount" $ do
-    it "simple-api" $ do
+    it "basic" $ do
       unionMountSpec
-        "simple"
+        "basic"
         ( do
             writeFile "file1" "hello"
         )
@@ -31,6 +31,20 @@ spec = do
         $ Map.fromList
           [ ("file1", "hello, again"),
             ("file2", "another file")
+          ]
+    it "deletion" $ do
+      unionMountSpec
+        "basic"
+        ( do
+            writeFile "file1" "hello"
+            writeFile "file2" "another file"
+        )
+        ( do
+            writeFile "file1" "hello, again"
+            removeFile "file2"
+        )
+        $ Map.fromList
+          [ ("file1", "hello, again")
           ]
 
 -- | Test `UM.mount` using a set of IO operations, and checking the final result.
@@ -59,6 +73,7 @@ unionMountSpec name ini update expected = do
       race_
         (patch $ LVar.set model)
         ( do
+            -- NOTE: These timings may not be enough on a slow system.
             threadDelay 500_000 -- Wait for the initial model to be loaded.
             liftIO $ withCurrentDirectory tempDir update
             threadDelay 500_000 -- Wait for fsnotify to handle events
