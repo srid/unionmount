@@ -49,32 +49,6 @@ spec = do
                 removeFile "file2"
             )
 
--- | Represent the mutation of a folder over time.
---
--- Initial state of the folder, along with the mutations to perform, both as IO
--- actions.
-data FolderMutation = FolderMutation
-  { -- | How to initialize the folder
-    _folderMutationInit :: IO (),
-    -- | IO operations to perform for updating the folder
-    _folderMutationUpdate :: IO ()
-  }
-
-runFolderMutation :: FolderMutation -> IO (Map.Map FilePath ByteString)
-runFolderMutation folder = do
-  withSystemTempDirectory "runFolderMutation" $ \tempDir -> do
-    withCurrentDirectory tempDir $ do
-      _folderMutationInit folder
-      _folderMutationUpdate folder
-      files <- getFilesRecursiveCurrentDir
-      Map.fromList <$> forM files (\f -> (f,) <$> readFileBS f)
-  where
-    getFilesRecursiveCurrentDir :: IO [FilePath]
-    getFilesRecursiveCurrentDir = do
-      fs <- getFilesRecursive "."
-      -- Remove the leading "./" from the file paths
-      pure $ fs <&> \f -> fromMaybe f $ stripPrefix "./" f
-
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
 -- equivalent to the state when these mutations are applied in normal IO context
@@ -112,6 +86,32 @@ unionMountSpec folders = do
     finalModel <- LVar.get model
     expected <- Map.unionsWith (<>) . fmap (Map.map one) <$> traverse runFolderMutation folders
     finalModel `shouldBe` expected
+
+-- | Represent the mutation of a folder over time.
+--
+-- Initial state of the folder, along with the mutations to perform, both as IO
+-- actions.
+data FolderMutation = FolderMutation
+  { -- | How to initialize the folder
+    _folderMutationInit :: IO (),
+    -- | IO operations to perform for updating the folder
+    _folderMutationUpdate :: IO ()
+  }
+
+runFolderMutation :: FolderMutation -> IO (Map.Map FilePath ByteString)
+runFolderMutation folder = do
+  withSystemTempDirectory "runFolderMutation" $ \tempDir -> do
+    withCurrentDirectory tempDir $ do
+      _folderMutationInit folder
+      _folderMutationUpdate folder
+      files <- getFilesRecursiveCurrentDir
+      Map.fromList <$> forM files (\f -> (f,) <$> readFileBS f)
+  where
+    getFilesRecursiveCurrentDir :: IO [FilePath]
+    getFilesRecursiveCurrentDir = do
+      fs <- getFilesRecursive "."
+      -- Remove the leading "./" from the file paths
+      pure $ fs <&> \f -> fromMaybe f $ stripPrefix "./" f
 
 -- | Like `withSystemTempDirectory`, but for multiple temp directories.
 withSystemTempDirectories ::
