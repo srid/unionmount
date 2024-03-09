@@ -6,6 +6,7 @@ module System.UnionMountSpec where
 import Control.Monad.Logger.Extras (logToStderr, runLoggerLoggingT)
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
+import Relude.Unsafe qualified as Unsafe
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern)
 import System.UnionMount qualified as UM
@@ -64,11 +65,15 @@ unionMountSpec name ini update expected = do
     withCurrentDirectory tempDir ini
     model <- LVar.empty
     flip runLoggerLoggingT logToStderr $ do
-      (model0, patch) <- UM.mount tempDir allFiles ignoreNone mempty $ \() fp -> \case
-        UM.Delete -> pure $ Map.delete fp
-        UM.Refresh _ () -> do
-          s <- readFileBS $ tempDir </> fp
-          pure $ Map.insert fp s
+      (model0, patch) <- UM.unionMount (one ((), tempDir)) allFiles ignoreNone mempty $ \change -> do
+        let files = Unsafe.fromJust $ Map.lookup () change
+        flip UM.chainM (Map.toList files) $ \(fp, act) -> do
+          case act of
+            UM.Delete -> pure $ Map.delete fp
+            UM.Refresh _ layers -> do
+              let fpL = snd . last $ layers
+              s <- readFileBS $ tempDir </> fpL
+              pure $ Map.insert fp s
       LVar.set model model0
       race_
         (patch $ LVar.set model)
