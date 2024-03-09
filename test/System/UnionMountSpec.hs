@@ -5,7 +5,7 @@ module System.UnionMountSpec where
 
 import Control.Monad.Logger.Extras (logToStderr, runLoggerLoggingT)
 import Data.LVar qualified as LVar
-import Data.List (stripPrefix)
+import Data.List (stripPrefix, union)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -24,6 +24,7 @@ import UnliftIO.Temporary (withSystemTempDirectory)
 
 spec :: Spec
 spec = do
+  -- TODO: Use QuickCheck to generate these.
   describe "unionmount" $ do
     it "basic" $ do
       unionMountSpec $
@@ -48,6 +49,25 @@ spec = do
                 writeFile "file1" "hello, again"
                 removeFile "file2"
             )
+    it "multiple layers" $ do
+      unionMountSpec $
+        FolderMutation
+          ( do
+              writeFile "file1" "hello"
+              writeFile "file3" "hello"
+          )
+          ( do
+              writeFile "file1" "hello, again"
+          )
+          :| [ FolderMutation
+                 ( do
+                     writeFile "file2" "another file"
+                 )
+                 ( do
+                     writeFile "file2" "another file, again"
+                     writeFile "file3" "file3 is in first layer"
+                 )
+             ]
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -78,6 +98,7 @@ unionMountSpec folders = do
     finalModel <- LVar.get model
     expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected
+    print expected
   where
     -- NOTE: These timings may not be enough on a slow system.
     withPaddedThreadDelay :: (MonadUnliftIO m) => Int -> m () -> m ()
