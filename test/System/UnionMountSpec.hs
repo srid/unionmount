@@ -1,13 +1,14 @@
 module System.UnionMountSpec where
 
 import Control.Monad.Logger.Extras (logToStderr, runLoggerLoggingT)
+import Data.LVar qualified as LVar
+import Data.Map.Strict qualified as Map
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern)
 import System.UnionMount qualified as UM
 import Test.Hspec
 import UnliftIO.Async (race_)
 import UnliftIO.Concurrent (threadDelay)
-import UnliftIO.STM (writeTMVar)
 import UnliftIO.Temporary (withSystemTempDirectory)
 
 spec :: Spec
@@ -17,28 +18,31 @@ spec = do
       -- Create a temporary directory, add a file to it, call `mount`, make an update to that file, and check that it is updated in memory.
       withSystemTempDirectory "unionmount" $ \tempDir -> do
         writeFile (tempDir </> "file1") "hello"
-        model <- newEmptyTMVarIO
+        model <- LVar.empty
         flip runLoggerLoggingT logToStderr $ do
-          (model0, update) <- UM.mount tempDir allFiles ignoreNone mempty (const accumulateActions)
-          atomically $ writeTMVar model model0
+          (model0, update) <- UM.mount tempDir allFiles ignoreNone mempty $ \() fp -> \case
+            UM.Delete -> pure $ Map.delete fp
+            UM.Refresh _ () -> do
+              s <- readFileBS $ tempDir </> fp
+              pure $ Map.insert fp s
+          LVar.set model model0
           race_
-            (update $ atomically . writeTMVar model)
+            (update $ LVar.set model)
             ( do
                 threadDelay 1000000 -- Wait for the initial model to be loaded.
                 writeFile (tempDir </> "file1") "hello, again"
+                writeFile (tempDir </> "file2") "another file"
                 threadDelay 1000000 -- Wait for fsnotify to handle events
             )
-        finalModel <- atomically $ readTMVar model
+        finalModel <- LVar.get model
         finalModel
-          `shouldBe` [ ("file1", UM.Refresh UM.Existing ()),
-                       ("file1", UM.Refresh UM.Update ())
-                     ]
+          `shouldBe` Map.fromList
+            [ ("file1", "hello, again"),
+              ("file2", "another file")
+            ]
 
 allFiles :: [((), FilePattern)]
 allFiles = [((), "*")]
 
 ignoreNone :: [a]
 ignoreNone = []
-
-accumulateActions :: (Applicative f, Show a, Show b) => a -> b -> f ([(a, b)] -> [(a, b)])
-accumulateActions fp act = pure $ reverse . (:) (fp, act)
