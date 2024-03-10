@@ -120,7 +120,7 @@ unionMountSpec folders = do
       LVar.set model model0
       race_
         (patch $ LVar.set model)
-        (withPaddedThreadDelay 1_000_000 $ updateUnionFolderMutations tempDirs)
+        (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
     finalModel <- LVar.get model
     expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected
