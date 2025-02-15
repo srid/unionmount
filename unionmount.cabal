@@ -82,6 +82,7 @@ test-suite test
     , hspec
     , monad-logger
     , monad-logger-extras
+    , unix
     , relude
 
   if flag(ghcid)
