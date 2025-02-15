@@ -9,7 +9,7 @@ jobs:
     runs-on: self-hosted
     strategy:
       matrix:
-        system: [aarch64-darwin, aarch64-linux]
+        system: [aarch64-darwin, x86_64-linux]
     steps:
       - uses: actions/checkout@v4
       - run: om ci run --systems "${{ matrix.system }}"
