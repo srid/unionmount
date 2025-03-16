@@ -6,7 +6,7 @@ on:
   pull_request:
 jobs:
   nix:
-    runs-on: self-hosted
+    runs-on: ${{ matrix.system }}
     strategy:
       matrix:
         system: [aarch64-darwin, x86_64-linux]
