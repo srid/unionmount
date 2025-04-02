@@ -15,6 +15,7 @@ import System.Directory (createDirectory)
 import System.Directory.Recursive (getFilesRecursive)
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern)
+import System.Posix.Files
 import System.UnionMount qualified as UM
 import Test.Hspec
 import UnliftIO (MonadUnliftIO)
@@ -38,6 +39,17 @@ spec = do
             ( do
                 writeFile "file1" "hello, again"
                 writeFile "file2" "another file"
+            )
+    it "bad-symlink" $ do
+      unionMountSpec $
+        one $
+          FolderMutation
+            Nothing
+            ( do
+                createSymbolicLink "/nonexistent" "alink"
+            )
+            ( do
+                writeFile "file1" "hello"
             )
     it "deletion" $ do
       unionMountSpec $
