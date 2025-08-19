@@ -1,5 +1,5 @@
 
-## Unreleased (0.3.0.0)
+## 0.3.0.0
 
 - Support for custom mount points (#6)
 
