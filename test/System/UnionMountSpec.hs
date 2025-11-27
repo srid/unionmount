@@ -3,7 +3,7 @@
 
 module System.UnionMountSpec where
 
-import Control.Monad.Logger.Extras (logToNowhere, runLoggerLoggingT)
+import Colog.Core (LogAction)
 import Data.LVar qualified as LVar
 import Data.List (stripPrefix)
 import Data.List.NonEmpty qualified as NE
@@ -106,21 +106,22 @@ unionMountSpec ::
 unionMountSpec folders = do
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
-    flip runLoggerLoggingT logToNowhere $ do
-      let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignoreNone mempty $ \change -> do
-        let files = Unsafe.fromJust $ Map.lookup () change
-        flip UM.chainM (Map.toList files) $ \(fp, act) -> do
-          case act of
-            UM.Delete -> pure $ Map.delete fp
-            UM.Refresh _ layerFiles -> do
-              contents <- for layerFiles $ \(tempDir, path) ->
-                readFileBS $ tempDir </> path
-              pure $ Map.insert fp contents
-      LVar.set model model0
-      race_
-        (patch $ LVar.set model)
-        (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
+    let logger :: LogAction IO Text
+        logger = mempty -- no logging
+        layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
+    (model0, patch) <- UM.unionMount logger layers allFiles ignoreNone mempty $ \change -> do
+      let files = Unsafe.fromJust $ Map.lookup () change
+      flip UM.chainM (Map.toList files) $ \(fp, act) -> do
+        case act of
+          UM.Delete -> pure $ Map.delete fp
+          UM.Refresh _ layerFiles -> do
+            contents <- for layerFiles $ \(tempDir, path) ->
+              readFileBS $ tempDir </> path
+            pure $ Map.insert fp contents
+    LVar.set model model0
+    race_
+      (patch $ LVar.set model)
+      (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
     finalModel <- LVar.get model
     expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected

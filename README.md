@@ -11,15 +11,17 @@ Here's a simple example of loading Markdown files onto a TVar of `Map FilePath T
 ```haskell
 import System.UnionMount qualified as UM
 import Data.Map.Strict qualified as Map
+import Colog.Core (LogAction, logStringStdout, cmap)
+import Data.Text qualified as T
 
 main :: IO ()
 main = do
-  runStdoutLoggingT $ do
-    let baseDir = "/Users/srid/Documents/Notebook"
-    (model0, modelF) <- UM.mount baseDir (one ((), "*.md")) [] mempty (const $ handlePathUpdate baseDir)
-    modelVar <- newTVarIO model0
-    modelF $ \newModel -> do
-      atomically $ writeTVar modelVar newModel
+  let logger = cmap T.unpack logStringStdout  -- Simple stdout logger
+      baseDir = "/Users/srid/Documents/Notebook"
+  (model0, modelF) <- UM.mount logger baseDir (one ((), "*.md")) [] mempty (const $ handlePathUpdate baseDir)
+  modelVar <- newTVarIO model0
+  modelF $ \newModel -> do
+    atomically $ writeTVar modelVar newModel
 
 handlePathUpdate ::
   (MonadIO m) =>
@@ -31,6 +33,26 @@ handlePathUpdate baseDir path action = do
       pure $ Map.insert path s
     UM.Delete -> do
       pure $ Map.delete path
+```
+
+### Logging
+
+unionmount uses [co-log-core](https://hackage.haskell.org/package/co-log-core) which has zero dependencies and allows you to bring your own logging implementation:
+
+- **No logging**: Pass `mempty` as the logger
+- **co-log**: Use any co-log logger
+- **monad-logger**: Create a LogAction that calls your monad-logger functions
+- **Custom**: Implement your own `LogAction m Text`
+
+```haskell
+-- No logging
+UM.mount mempty folder pats ignore model handleAction
+
+-- Using co-log
+import Colog.Core (logStringStdout, cmap)
+import Data.Text qualified as T
+let logger = cmap T.unpack logStringStdout
+UM.mount logger folder pats ignore model handleAction
 ```
 
 ### Examples
