@@ -17,7 +17,7 @@ module System.UnionMount
   )
 where
 
-import Colog.Core (LogAction, (<&))
+import Colog.Core (LogAction, Severity (..), WithSeverity (..), (<&))
 import Control.Concurrent (threadDelay)
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
@@ -49,7 +49,7 @@ mount ::
     Ord b
   ) =>
   -- | Logger
-  LogAction m Text ->
+  LogAction m (WithSeverity Text) ->
   -- | The directory to mount.
   FilePath ->
   -- | Only include these files (exclude everything else)
@@ -96,7 +96,7 @@ unionMount ::
     Ord tag
   ) =>
   -- | Logger
-  LogAction m Text ->
+  LogAction m (WithSeverity Text) ->
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
@@ -114,7 +114,7 @@ unionMount logger sources pats ignore model0 handleAction = do
           LVar.modify lvar change'
           x <- LVar.get lvar
           send x
-        logger <& "Remounting..."
+        logger <& WithSeverity "Remounting..." Info
         (a, b) <- unionMount logger sources pats ignore model0 handleAction
         send a
         b send
@@ -123,11 +123,11 @@ unionMount logger sources pats ignore model0 handleAction = do
 -- Log and ignore exceptions
 --
 -- TODO: Make user define-able?
-interceptExceptions :: (MonadIO m, MonadUnliftIO m) => LogAction m Text -> a -> m a -> m a
+interceptExceptions :: (MonadIO m, MonadUnliftIO m) => LogAction m (WithSeverity Text) -> a -> m a -> m a
 interceptExceptions logger default_ f = do
   try f >>= \case
     Left (ex :: SomeException) -> do
-      logger <& ("Change handler exception: " <> show ex)
+      logger <& WithSeverity ("Change handler exception: " <> show ex) Error
       pure default_
     Right v ->
       pure v
@@ -154,7 +154,7 @@ unionMount' ::
     Ord tag
   ) =>
   -- | Logger
-  LogAction m Text ->
+  LogAction m (WithSeverity Text) ->
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
@@ -198,11 +198,11 @@ unionMount' logger sources pats ignore = do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
                         if shouldIgnore
                           then do
-                            lift $ logger <& (reason <> " on an ignored path")
+                            lift $ logger <& WithSeverity (reason <> " on an ignored path") Warning
                             loop
                           else do
                             -- We don't know yet how to deal with folder events. Just reboot the mount.
-                            lift $ logger <& (reason <> "; suggesting a re-mount")
+                            lift $ logger <& WithSeverity (reason <> "; suggesting a re-mount") Warning
                             pure Cmd_Remount -- Exit, asking user to remokunt
                       Right act -> do
                         case guard (not shouldIgnore) >> getTag pats fp of
@@ -215,15 +215,15 @@ unionMount' logger sources pats ignore = do
                in evalStateT loop ofs
       )
 
-filesMatching :: (MonadIO m) => LogAction m Text -> FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
+filesMatching :: (MonadIO m) => LogAction m (WithSeverity Text) -> FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
 filesMatching logger parent' pats ignore = do
   parent <- liftIO $ canonicalizePath parent'
-  logger <& (toText $ "Traversing " <> parent <> " for files matching " <> show pats <> ", ignoring " <> show ignore)
+  logger <& WithSeverity (toText $ "Traversing " <> parent <> " for files matching " <> show pats <> ", ignoring " <> show ignore) Info
   liftIO $ getDirectoryFilesIgnore parent pats ignore
 
 -- | Like `filesMatching` but with a tag associated with a pattern so as to be
 -- able to tell which pattern a resulting filepath is associated with.
-filesMatchingWithTag :: (MonadIO m, Ord b) => LogAction m Text -> FilePath -> [(b, FilePattern)] -> [FilePattern] -> m [(b, [FilePath])]
+filesMatchingWithTag :: (MonadIO m, Ord b) => LogAction m (WithSeverity Text) -> FilePath -> [(b, FilePattern)] -> [FilePattern] -> m [(b, [FilePath])]
 filesMatchingWithTag logger parent' pats ignore = do
   fs <- filesMatching logger parent' (snd <$> pats) ignore
   let m = Map.fromListWith (<>) $
@@ -277,7 +277,7 @@ refreshAction = \case
 onChange ::
   forall x m.
   (Eq x, MonadIO m, MonadUnliftIO m) =>
-  LogAction m Text ->
+  LogAction m (WithSeverity Text) ->
   TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) ->
   [(x, (FilePath, Maybe FilePath))] ->
   -- | The filepath is relative to the folder being monitored, unless if its
@@ -290,9 +290,9 @@ onChange logger q roots = do
       -- transform fsnotify event's (absolute) path into one that is relative to
       -- @parent'@ (as passed by user), which is what @f@ will expect.
       root <- liftIO $ canonicalizePath rootRel
-      logger <& (toText $ "Monitoring " <> root <> " for changes")
+      logger <& WithSeverity (toText $ "Monitoring " <> root <> " for changes") Info
       watchTreeM mgr root (const True) $ \event -> do
-        logger <& show event
+        logger <& WithSeverity (show event) Debug
         atomically $ do
           lastQ <- tryTakeTMVar q
           let fp = makeRelative root $ eventPath event
@@ -321,7 +321,7 @@ onChange logger q roots = do
                 (_, Just a) -> reAddQ >> f (Right a)
     liftIO (threadDelay maxBound)
       `finally` do
-        logger <& "Stopping fsnotify monitor."
+        logger <& WithSeverity "Stopping fsnotify monitor." Info
         liftIO $ forM_ stops id
     -- Unreachable
     pure Cmd_Remount

@@ -3,7 +3,7 @@
 
 module System.UnionMountSpec where
 
-import Colog.Core (LogAction)
+import Colog.Core (LogAction, WithSeverity)
 import Data.LVar qualified as LVar
 import Data.List (stripPrefix)
 import Data.List.NonEmpty qualified as NE
@@ -106,7 +106,7 @@ unionMountSpec ::
 unionMountSpec folders = do
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
-    let logger :: LogAction IO Text
+    let logger :: LogAction IO (WithSeverity Text)
         logger = mempty -- no logging
         layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
     (model0, patch) <- UM.unionMount logger layers allFiles ignoreNone mempty $ \change -> do
