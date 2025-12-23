@@ -2,8 +2,6 @@
 
 module System.UnionMount.IgnoreSpec where
 
-import Data.List (sort)
-import System.Directory (createDirectory, writeFile)
 import System.FilePath ((</>))
 import System.UnionMount.Ignore (readIgnoreFile)
 import Test.Hspec
