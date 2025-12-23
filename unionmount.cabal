@@ -69,7 +69,10 @@ common library-common
 
 library
   import:          library-common
-  exposed-modules: System.UnionMount
+  exposed-modules:
+    System.UnionMount
+    System.UnionMount.Ignore
+
   hs-source-dirs:  src
 
 test-suite test
@@ -80,8 +83,10 @@ test-suite test
   build-depends:
     , dir-traverse
     , hspec
+    , map-syntax
     , monad-logger
     , monad-logger-extras
+    , neat-interpolation
     , relude
 
   if flag(ghcid)
@@ -89,4 +94,6 @@ test-suite test
 
   else
     build-depends: unionmount
-    other-modules: System.UnionMountSpec
+    other-modules:
+      System.UnionMount.IgnoreSpec
+      System.UnionMountSpec

@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeApplications #-}
 
 module System.UnionMount
@@ -11,6 +12,7 @@ module System.UnionMount
     FileAction (..),
     RefreshAction (..),
     Change,
+    IgnoreConfig (..),
 
     -- * For tests
     chainM,
@@ -42,6 +44,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
+import System.UnionMount.Ignore (IgnoreConfig (..), applyIgnoreConfigToSources)
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
@@ -57,8 +60,8 @@ mount ::
   FilePath ->
   -- | Only include these files (exclude everything else)
   [(b, FilePattern)] ->
-  -- | Ignore these patterns
-  [FilePattern] ->
+  -- | Ignore configuration
+  IgnoreConfig ->
   -- | Initial value of model, onto which to apply updates.
   model ->
   -- | How to update the model given a file action.
@@ -71,10 +74,10 @@ mount ::
   -- If the action throws an exception, it will be logged and ignored.
   (b -> FilePath -> FileAction () -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-mount folder pats ignore var0 toAction' =
+mount folder pats ignoreConfig var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignore var0 $ \ch -> do
+   in unionMount sources pats ignoreConfig var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -101,12 +104,13 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
+  -- | Global ignore patterns
+  IgnoreConfig ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignore
+unionMount sources pats ignoreConfig model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats ignoreConfig
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -117,7 +121,7 @@ unionMount sources pats ignore model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignore model0 handleAction
+        (a, b) <- unionMount sources pats ignoreConfig model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -147,7 +151,6 @@ data Cmd
   = Cmd_Remount
   deriving (Eq, Show)
 
--- | Like `unionMount` but without exception interrupting or re-mounting.
 unionMount' ::
   forall source tag m m1.
   ( MonadIO m,
@@ -160,19 +163,22 @@ unionMount' ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
+  IgnoreConfig ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore = do
+unionMount' sources pats ignoreConfig = do
+  let sourceFolders = toList $ Set.map (\(src, (folder, _)) -> (src, folder)) sources
+  sourceIgnorePats <- applyIgnoreConfigToSources ignoreConfig sourceFolders
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
         forM_ sources $ \(src, (folder, mountPoint)) -> do
-          taggedFiles <- filesMatchingWithTag folder pats ignore
+          let srcIgnore = fromMaybe [] $ Map.lookup src sourceIgnorePats
+          taggedFiles <- filesMatchingWithTag folder pats srcIgnore
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
               put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
@@ -195,7 +201,8 @@ unionMount' sources pats ignore = do
                       =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
-                    let shouldIgnore = any (?== fp) ignore
+                    let srcIgnore = fromMaybe [] $ Map.lookup src sourceIgnorePats
+                        shouldIgnore = any (?== fp) srcIgnore
                     case actE of
                       Left _ -> do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
@@ -208,13 +215,18 @@ unionMount' sources pats ignore = do
                             log LevelWarn $ reason <> "; suggesting a re-mount"
                             pure Cmd_Remount -- Exit, asking user to remokunt
                       Right act -> do
-                        case guard (not shouldIgnore) >> getTag pats fp of
-                          Nothing -> loop
-                          Just tag -> do
-                            changes <- fmap snd . flip runStateT Map.empty $ do
-                              put =<< lift . changeInsert src tag mountPoint fp act =<< get
-                            lift $ reportChange changes
-                            loop
+                        -- If the ignore file itself changed, remount.
+                        if ignoreConfig.ignoreFileName == Just fp
+                          then do
+                            log LevelInfo $ "Ignore file changed (" <> toText fp <> "), remounting..."
+                            pure Cmd_Remount
+                          else case guard (not shouldIgnore) >> getTag pats fp of
+                            Nothing -> loop
+                            Just tag -> do
+                              changes <- fmap snd . flip runStateT Map.empty $ do
+                                put =<< lift . changeInsert src tag mountPoint fp act =<< get
+                              lift $ reportChange changes
+                              loop
                in evalStateT loop ofs
       )
 
