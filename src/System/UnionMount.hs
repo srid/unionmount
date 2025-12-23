@@ -18,14 +18,21 @@ module System.UnionMount
 where
 
 import Control.Concurrent (threadDelay)
+import Control.Monad (forM, void)
 import Control.Monad.Logger
   ( LogLevel (LevelDebug, LevelError, LevelInfo, LevelWarn),
     MonadLogger,
     logWithoutLoc,
   )
+import Data.ByteString qualified as BS
 import Data.LVar qualified as LVar
+import Data.List (foldl')
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import System.Directory (canonicalizePath)
 import System.FSNotify
   ( ActionPredicate,
@@ -42,7 +49,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
+import UnliftIO (MonadIO, MonadUnliftIO, SomeException, finally, liftIO, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
 mount ::
@@ -57,8 +64,8 @@ mount ::
   FilePath ->
   -- | Only include these files (exclude everything else)
   [(b, FilePattern)] ->
-  -- | Ignore these patterns
-  [FilePattern] ->
+  -- | Ignore file pattern (optional)
+  Maybe FilePattern ->
   -- | Initial value of model, onto which to apply updates.
   model ->
   -- | How to update the model given a file action.
@@ -71,10 +78,10 @@ mount ::
   -- If the action throws an exception, it will be logged and ignored.
   (b -> FilePath -> FileAction () -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-mount folder pats ignore var0 toAction' =
+mount folder pats ignoreFile var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignore var0 $ \ch -> do
+   in unionMount sources pats ignoreFile var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -101,12 +108,31 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
+  Maybe FilePattern ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignore
+unionMount sources pats ignoreFilePattern model0 handleAction = do
+  dynamicIgnores <-
+    case ignoreFilePattern of
+      Nothing -> pure []
+      Just pat ->
+        interceptExceptions [] $
+          do
+            -- Find the ignore file in one of the sources
+            -- TODO: Support ignore file in ANY source? taking the first one found?
+            -- For now, let's look in all sources and take the union of ignores?
+            -- Or just assume it's in the first one?
+            -- The requirement is "per layer".
+            -- If I have multiple layers, and each has .emanoteignore.
+            -- I should probably read ALL of them.
+            -- But `unionMount` doesn't iterate sources to read config currently.
+            -- `filesMatching` allows `UnionMount` to traverse.
+            -- Let's just try to read from all sources.
+            mconcat <$> mapM (readIgnoreFilePat pat . fst . snd) (toList sources)
+
+  let ignore = dynamicIgnores
+  (x0, xf) <- unionMount' sources pats ignore ignoreFilePattern
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -117,10 +143,20 @@ unionMount sources pats ignore model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignore model0 handleAction
+        (a, b) <- unionMount sources pats ignoreFilePattern model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
+  where
+    readIgnoreFilePat pat folder = do
+      files <- liftIO $ getDirectoryFilesIgnore folder [pat] []
+      fmap mconcat $ forM files $ \f -> do
+        s <- liftIO $ BS.readFile $ folder </> f
+        pure $ parseIgnorePatterns $ TE.decodeUtf8 s
+
+    parseIgnorePatterns :: Text -> [FilePattern]
+    parseIgnorePatterns =
+      fmap T.unpack . filter (not . T.isPrefixOf (T.pack "#")) . filter (not . T.null) . fmap T.strip . T.lines
 
 -- Log and ignore exceptions
 --
@@ -147,7 +183,6 @@ data Cmd
   = Cmd_Remount
   deriving (Eq, Show)
 
--- | Like `unionMount` but without exception interrupting or re-mounting.
 unionMount' ::
   forall source tag m m1.
   ( MonadIO m,
@@ -161,12 +196,13 @@ unionMount' ::
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
+  Maybe FilePattern ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore = do
+unionMount' sources pats ignore ignoreFilePattern = do
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
@@ -196,25 +232,33 @@ unionMount' sources pats ignore = do
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
                     let shouldIgnore = any (?== fp) ignore
-                    case actE of
-                      Left _ -> do
-                        let reason = "Unhandled folder event on '" <> toText fp <> "'"
-                        if shouldIgnore
-                          then do
-                            log LevelWarn $ reason <> " on an ignored path"
-                            loop
-                          else do
-                            -- We don't know yet how to deal with folder events. Just reboot the mount.
-                            log LevelWarn $ reason <> "; suggesting a re-mount"
-                            pure Cmd_Remount -- Exit, asking user to remokunt
-                      Right act -> do
-                        case guard (not shouldIgnore) >> getTag pats fp of
-                          Nothing -> loop
-                          Just tag -> do
-                            changes <- fmap snd . flip runStateT Map.empty $ do
-                              put =<< lift . changeInsert src tag mountPoint fp act =<< get
-                            lift $ reportChange changes
-                            loop
+                    -- If the ignore file itself changed, remount.
+                    let isIgnoreFile = case ignoreFilePattern of
+                          Nothing -> False
+                          Just pat -> pat ?== fp
+                    if isIgnoreFile
+                      then do
+                        log LevelInfo $ "Ignore file changed (" <> toText fp <> "), remounting..."
+                        pure Cmd_Remount
+                      else case actE of
+                        Left _ -> do
+                          let reason = "Unhandled folder event on '" <> toText fp <> "'"
+                          if shouldIgnore
+                            then do
+                              log LevelWarn $ reason <> " on an ignored path"
+                              loop
+                            else do
+                              -- We don't know yet how to deal with folder events. Just reboot the mount.
+                              log LevelWarn $ reason <> "; suggesting a re-mount"
+                              pure Cmd_Remount -- Exit, asking user to remokunt
+                        Right act -> do
+                          case guard (not shouldIgnore) >> getTag pats fp of
+                            Nothing -> loop
+                            Just tag -> do
+                              changes <- fmap snd . flip runStateT Map.empty $ do
+                                put =<< lift . changeInsert src tag mountPoint fp act =<< get
+                              lift $ reportChange changes
+                              loop
                in evalStateT loop ofs
       )
 

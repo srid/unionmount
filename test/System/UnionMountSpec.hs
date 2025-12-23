@@ -73,27 +73,45 @@ spec = do
                      writeFile "file3" "file3 is in first layer"
                  )
              ]
-    it "mount point layers" $ do
-      unionMountSpec $
-        FolderMutation
-          Nothing
-          ( do
-              writeFile "file1" "hello"
-              writeFile "file3" "hello"
-          )
-          ( do
-              writeFile "file1" "hello, again"
-          )
-          :| [ FolderMutation
-                 (Just "foo")
-                 ( do
-                     writeFile "file2" "another file"
-                 )
-                 ( do
-                     writeFile "file2" "another file, again"
-                     writeFile "file3" "file3 is in first layer"
-                 )
-             ]
+    it "ignore file hot reload" $ do
+      let folders =
+            one $
+              FolderMutation
+                Nothing
+                ( do
+                    writeFile "file1" "visible"
+                    writeFile "secret" "hidden"
+                    writeFile ".emanoteignore" "secret"
+                )
+                ( do
+                    writeFile ".emanoteignore" ""
+                )
+      withUnionFolderMutations folders $ \tempDirs -> do
+        model <- LVar.empty
+        flip runLoggerLoggingT logToNowhere $ do
+          let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
+          (model0, patch) <- UM.unionMount layers allFiles (Just ".emanoteignore") mempty $ \change -> do
+            let files = Unsafe.fromJust $ Map.lookup () change
+            flip UM.chainM (Map.toList files) $ \(fp, act) -> do
+              case act of
+                UM.Delete -> pure $ Map.delete fp
+                UM.Refresh _ layerFiles -> do
+                  contents <- for layerFiles $ \(tempDir, path) ->
+                    readFileBS $ tempDir </> path
+                  pure $ Map.insert fp contents
+          -- Check `model0`.
+          liftIO $ do
+            Map.member "secret" model0 `shouldBe` False
+            Map.member "file1" model0 `shouldBe` True
+
+          LVar.set model model0
+          race_
+            (patch $ LVar.set model)
+            (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
+        finalModel <- LVar.get model
+        -- Verify final model has "secret" (because we cleared ignore file)
+        Map.member "secret" finalModel `shouldBe` True
+        Map.member "file1" finalModel `shouldBe` True
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -103,12 +121,18 @@ unionMountSpec ::
   -- | The folder mutations to test
   UnionFolderMutations ->
   Expectation
-unionMountSpec folders = do
+unionMountSpec = unionMountSpec' Nothing
+
+unionMountSpec' ::
+  Maybe FilePattern ->
+  UnionFolderMutations ->
+  Expectation
+unionMountSpec' ignoreFile folders = do
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignoreNone mempty $ \change -> do
+      (model0, patch) <- UM.unionMount layers allFiles ignoreFile mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of
@@ -124,16 +148,6 @@ unionMountSpec folders = do
     finalModel <- LVar.get model
     expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected
-    print expected
-  where
-    -- NOTE: These timings may not be enough on a slow system.
-    withPaddedThreadDelay :: (MonadUnliftIO m) => Int -> m () -> m ()
-    withPaddedThreadDelay padding action = do
-      -- Wait for the initial model to be loaded.
-      threadDelay padding
-      action
-      -- Wait for fsnotify to handle events
-      threadDelay padding
 
 -- | Represent the mutation of a folder over time.
 --
@@ -223,3 +237,12 @@ allFiles = [((), "*")]
 
 ignoreNone :: [a]
 ignoreNone = []
+
+-- NOTE: These timings may not be enough on a slow system.
+withPaddedThreadDelay :: (MonadUnliftIO m) => Int -> m () -> m ()
+withPaddedThreadDelay padding action = do
+  -- Wait for the initial model to be loaded.
+  threadDelay padding
+  action
+  -- Wait for fsnotify to handle events
+  threadDelay padding
