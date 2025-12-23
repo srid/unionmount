@@ -69,7 +69,10 @@ common library-common
 
 library
   import:          library-common
-  exposed-modules: System.UnionMount
+  exposed-modules:
+    System.UnionMount
+    System.UnionMount.Ignore
+
   hs-source-dirs:  src
 
 test-suite test

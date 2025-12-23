@@ -23,12 +23,9 @@ import Control.Monad.Logger
     MonadLogger,
     logWithoutLoc,
   )
-import Data.ByteString qualified as BS
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
-import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
 import System.Directory (canonicalizePath)
 import System.FSNotify
   ( ActionPredicate,
@@ -45,6 +42,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
+import System.UnionMount.Ignore (readIgnoreFile)
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
@@ -110,7 +108,9 @@ unionMount ::
   m (model, (model -> m ()) -> m ())
 unionMount sources pats ignoreFile model0 handleAction = do
   let folders = toList $ Set.map (fst . snd) sources
-  ignores <- readIgnoreFile ignoreFile folders
+  ignores <- case ignoreFile of
+    Nothing -> pure []
+    Just file -> readIgnoreFile file folders
   (x0, xf) <- unionMount' sources pats ignores ignoreFile
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
@@ -126,33 +126,6 @@ unionMount sources pats ignoreFile model0 handleAction = do
         send a
         b send
   pure (x0' model0, sender)
-
--- | Read ignore patterns from the specified ignore file in all sources.
---
--- If multiple sources contain the ignore file, patterns from all of them are
--- combined (union). If the ignore file is not found in a source, it is silently
--- skipped. Comments (lines starting with #) and empty lines are ignored.
-readIgnoreFile ::
-  (MonadIO m, MonadUnliftIO m, MonadLogger m) =>
-  Maybe FilePath ->
-  [FilePath] ->
-  m [FilePattern]
-readIgnoreFile ignoreFile folders =
-  case ignoreFile of
-    Nothing -> pure []
-    Just file ->
-      interceptExceptions [] $
-        mconcat <$> mapM (readIgnoreFilePat file) (toList folders)
-  where
-    readIgnoreFilePat file folder = do
-      files <- liftIO $ getDirectoryFilesIgnore folder [file] []
-      fmap mconcat $ forM files $ \f -> do
-        s <- liftIO $ BS.readFile $ folder </> f
-        pure $ parseIgnorePatterns $ TE.decodeUtf8 s
-
-    parseIgnorePatterns :: Text -> [FilePattern]
-    parseIgnorePatterns =
-      fmap (toString . T.strip) . filter (not . T.isPrefixOf "#") . filter (not . T.null) . T.lines
 
 -- Log and ignore exceptions
 --
