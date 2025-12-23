@@ -73,6 +73,27 @@ spec = do
                      writeFile "file3" "file3 is in first layer"
                  )
              ]
+    it "mount point layers" $ do
+      unionMountSpec $
+        FolderMutation
+          Nothing
+          ( do
+              writeFile "file1" "hello"
+              writeFile "file3" "hello"
+          )
+          ( do
+              writeFile "file1" "hello, again"
+          )
+          :| [ FolderMutation
+                 (Just "foo")
+                 ( do
+                     writeFile "file2" "another file"
+                 )
+                 ( do
+                     writeFile "file2" "another file, again"
+                     writeFile "file3" "file3 is in first layer"
+                 )
+             ]
     it "ignore file hot reload" $ do
       let folders =
             one $

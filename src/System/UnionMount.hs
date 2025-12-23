@@ -65,7 +65,7 @@ mount ::
   -- | Only include these files (exclude everything else)
   [(b, FilePattern)] ->
   -- | Ignore file pattern (optional)
-  Maybe FilePattern ->
+  Maybe FilePath ->
   -- | Initial value of model, onto which to apply updates.
   model ->
   -- | How to update the model given a file action.
@@ -108,7 +108,7 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  Maybe FilePattern ->
+  Maybe FilePath ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
@@ -202,7 +202,7 @@ unionMount' ::
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore ignoreFilePattern = do
+unionMount' sources pats ignore ignoreFile = do
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
@@ -232,27 +232,27 @@ unionMount' sources pats ignore ignoreFilePattern = do
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
                     let shouldIgnore = any (?== fp) ignore
-                    -- If the ignore file itself changed, remount.
-                    let isIgnoreFile = case ignoreFilePattern of
-                          Nothing -> False
-                          Just pat -> pat ?== fp
-                    if isIgnoreFile
-                      then do
-                        log LevelInfo $ "Ignore file changed (" <> toText fp <> "), remounting..."
-                        pure Cmd_Remount
-                      else case actE of
-                        Left _ -> do
-                          let reason = "Unhandled folder event on '" <> toText fp <> "'"
-                          if shouldIgnore
-                            then do
-                              log LevelWarn $ reason <> " on an ignored path"
-                              loop
-                            else do
-                              -- We don't know yet how to deal with folder events. Just reboot the mount.
-                              log LevelWarn $ reason <> "; suggesting a re-mount"
-                              pure Cmd_Remount -- Exit, asking user to remokunt
-                        Right act -> do
-                          case guard (not shouldIgnore) >> getTag pats fp of
+                    case actE of
+                      Left _ -> do
+                        let reason = "Unhandled folder event on '" <> toText fp <> "'"
+                        if shouldIgnore
+                          then do
+                            log LevelWarn $ reason <> " on an ignored path"
+                            loop
+                          else do
+                            -- We don't know yet how to deal with folder events. Just reboot the mount.
+                            log LevelWarn $ reason <> "; suggesting a re-mount"
+                            pure Cmd_Remount -- Exit, asking user to remokunt
+                      Right act -> do
+                        -- If the ignore file itself changed, remount.
+                        let isIgnoreFile = case ignoreFile of
+                              Nothing -> False
+                              Just f -> f == fp
+                        if isIgnoreFile
+                          then do
+                            log LevelInfo $ "Ignore file changed (" <> toText fp <> "), remounting..."
+                            pure Cmd_Remount
+                          else case guard (not shouldIgnore) >> getTag pats fp of
                             Nothing -> loop
                             Just tag -> do
                               changes <- fmap snd . flip runStateT Map.empty $ do
