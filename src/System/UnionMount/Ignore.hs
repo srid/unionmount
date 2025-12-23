@@ -1,12 +1,15 @@
 module System.UnionMount.Ignore
   ( IgnorePattern (..),
+    IgnoreConfig (..),
     readIgnoreFile,
     applyIgnorePatterns,
     readIgnoreFileWithGlobalPats,
+    applyIgnoreConfigToSources,
   )
 where
 
 import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import System.FilePath (takeDirectory, takeFileName, (</>))
@@ -21,6 +24,15 @@ data IgnorePattern
     Ignore FilePattern
   | -- | Un-ignore files matching this pattern (removes from ignore list)
     UnIgnore FilePattern
+  deriving (Eq, Show)
+
+-- | Configuration for ignore file behavior.
+data IgnoreConfig = IgnoreConfig
+  { -- | Global ignore patterns to apply to all sources
+    globalPatterns :: [FilePattern],
+    -- | Optional ignore file name (e.g., @.emanoteignore@)
+    ignoreFileName :: Maybe FilePath
+  }
   deriving (Eq, Show)
 
 -- | Read and parse ignore patterns from an ignore file.
@@ -105,3 +117,23 @@ readIgnoreFileWithGlobalPats ::
 readIgnoreFileWithGlobalPats globalPats ignoreFilePath = do
   localPats <- readIgnoreFile ignoreFilePath
   pure $ applyIgnorePatterns globalPats localPats
+
+-- | Apply ignore configuration to multiple sources.
+--
+-- For each source, if an ignore file name is specified in the config, reads that
+-- file from the source's folder and applies the patterns. Otherwise, returns the
+-- global patterns for all sources.
+--
+-- Returns a Map from source to effective ignore patterns for that source.
+applyIgnoreConfigToSources ::
+  (MonadIO m, Ord s) =>
+  IgnoreConfig ->
+  [(s, FilePath)] ->
+  m (Map s [FilePattern])
+applyIgnoreConfigToSources (IgnoreConfig globalPats maybeIgnoreFile) sources = do
+  case maybeIgnoreFile of
+    Nothing -> pure $ Map.fromList [(src, globalPats) | (src, _) <- sources]
+    Just ignoreFile -> do
+      fmap Map.fromList $ forM sources $ \(src, folder) -> do
+        effectivePats <- readIgnoreFileWithGlobalPats globalPats (folder </> ignoreFile)
+        pure (src, effectivePats)
