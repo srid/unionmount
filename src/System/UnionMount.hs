@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeApplications #-}
 
 module System.UnionMount
@@ -168,7 +169,7 @@ unionMount' ::
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignoreConfig@(IgnoreConfig _ maybeIgnoreFile) = do
+unionMount' sources pats ignoreConfig = do
   let sourceFolders = toList $ Set.map (\(src, (folder, _)) -> (src, folder)) sources
   sourceIgnorePats <- applyIgnoreConfigToSources ignoreConfig sourceFolders
   flip evalStateT (emptyOverlayFs @source) $ do
@@ -215,10 +216,7 @@ unionMount' sources pats ignoreConfig@(IgnoreConfig _ maybeIgnoreFile) = do
                             pure Cmd_Remount -- Exit, asking user to remokunt
                       Right act -> do
                         -- If the ignore file itself changed, remount.
-                        let isIgnoreFile = case maybeIgnoreFile of
-                              Nothing -> False
-                              Just f -> f == fp
-                        if isIgnoreFile
+                        if ignoreConfig.ignoreFileName == Just fp
                           then do
                             log LevelInfo $ "Ignore file changed (" <> toText fp <> "), remounting..."
                             pure Cmd_Remount
