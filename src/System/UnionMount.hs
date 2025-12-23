@@ -112,27 +112,9 @@ unionMount ::
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignoreFilePattern model0 handleAction = do
-  dynamicIgnores <-
-    case ignoreFilePattern of
-      Nothing -> pure []
-      Just pat ->
-        interceptExceptions [] $
-          do
-            -- Find the ignore file in one of the sources
-            -- TODO: Support ignore file in ANY source? taking the first one found?
-            -- For now, let's look in all sources and take the union of ignores?
-            -- Or just assume it's in the first one?
-            -- The requirement is "per layer".
-            -- If I have multiple layers, and each has .emanoteignore.
-            -- I should probably read ALL of them.
-            -- But `unionMount` doesn't iterate sources to read config currently.
-            -- `filesMatching` allows `UnionMount` to traverse.
-            -- Let's just try to read from all sources.
-            mconcat <$> mapM (readIgnoreFilePat pat . fst . snd) (toList sources)
-
-  let ignore = dynamicIgnores
-  (x0, xf) <- unionMount' sources pats ignore ignoreFilePattern
+unionMount sources pats ignoreFile model0 handleAction = do
+  ignores <- readIgnoreFile ignoreFile sources
+  (x0, xf) <- unionMount' sources pats ignores ignoreFile
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -143,13 +125,25 @@ unionMount sources pats ignoreFilePattern model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignoreFilePattern model0 handleAction
+        (a, b) <- unionMount sources pats ignoreFile model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
+
+readIgnoreFile ::
+  (MonadIO m, MonadUnliftIO m, MonadLogger m) =>
+  Maybe FilePath ->
+  Set (source, (FilePath, Maybe FilePath)) ->
+  m [FilePattern]
+readIgnoreFile ignoreFile sources =
+  case ignoreFile of
+    Nothing -> pure []
+    Just file ->
+      interceptExceptions [] $
+        mconcat <$> mapM (readIgnoreFilePat file . fst . snd) (toList sources)
   where
-    readIgnoreFilePat pat folder = do
-      files <- liftIO $ getDirectoryFilesIgnore folder [pat] []
+    readIgnoreFilePat file folder = do
+      files <- liftIO $ getDirectoryFilesIgnore folder [file] []
       fmap mconcat $ forM files $ \f -> do
         s <- liftIO $ BS.readFile $ folder </> f
         pure $ parseIgnorePatterns $ TE.decodeUtf8 s
