@@ -83,8 +83,10 @@ test-suite test
   build-depends:
     , dir-traverse
     , hspec
+    , map-syntax
     , monad-logger
     , monad-logger-extras
+    , neat-interpolation
     , relude
 
   if flag(ghcid)
