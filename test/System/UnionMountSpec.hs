@@ -111,7 +111,7 @@ spec = do
         model <- LVar.empty
         flip runLoggerLoggingT logToNowhere $ do
           let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-          (model0, patch) <- UM.unionMount layers allFiles (Just ".emanoteignore") mempty $ \change -> do
+          (model0, patch) <- UM.unionMount layers allFiles [] (Just ".emanoteignore") mempty $ \change -> do
             let files = Unsafe.fromJust $ Map.lookup () change
             flip UM.chainM (Map.toList files) $ \(fp, act) -> do
               case act of
@@ -153,7 +153,7 @@ unionMountSpec' ignoreFile folders = do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignoreFile mempty $ \change -> do
+      (model0, patch) <- UM.unionMount layers allFiles [] ignoreFile mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of

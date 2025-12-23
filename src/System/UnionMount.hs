@@ -42,7 +42,7 @@ import System.FSNotify
 import System.FilePath (isRelative, makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
-import System.UnionMount.Ignore (readIgnoreFile)
+import System.UnionMount.Ignore (readIgnoreFileWithGlobalPats)
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
@@ -58,7 +58,9 @@ mount ::
   FilePath ->
   -- | Only include these files (exclude everything else)
   [(b, FilePattern)] ->
-  -- | Ignore file pattern (optional)
+  -- | Global ignore patterns
+  [FilePattern] ->
+  -- | Ignore file name (optional)
   Maybe FilePath ->
   -- | Initial value of model, onto which to apply updates.
   model ->
@@ -72,10 +74,10 @@ mount ::
   -- If the action throws an exception, it will be logged and ignored.
   (b -> FilePath -> FileAction () -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-mount folder pats ignoreFile var0 toAction' =
+mount folder pats globalIgnorePats ignoreFile var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignoreFile var0 $ \ch -> do
+   in unionMount sources pats globalIgnorePats ignoreFile var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -102,12 +104,15 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
+  -- | Global ignore patterns
+  [FilePattern] ->
+  -- | Ignore file name
   Maybe FilePath ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignoreFile model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignoreFile
+unionMount sources pats globalIgnorePats ignoreFile model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats globalIgnorePats ignoreFile
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -118,7 +123,7 @@ unionMount sources pats ignoreFile model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignoreFile model0 handleAction
+        (a, b) <- unionMount sources pats globalIgnorePats ignoreFile model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -148,6 +153,26 @@ data Cmd
   = Cmd_Remount
   deriving (Eq, Show)
 
+-- | Read ignore files for each source and apply global patterns.
+--
+-- For each source, reads its ignore file (if it exists), parses the patterns,
+-- and applies them to the global patterns using 'applyIgnorePatterns'.
+--
+-- Returns a Map from source to effective ignore patterns for that source.
+readIgnoreFilesForSources ::
+  (MonadIO m, Ord s) =>
+  -- | Global ignore patterns
+  [FilePattern] ->
+  -- | Ignore file name (e.g., @.emanoteignore@)
+  FilePath ->
+  -- | Sources with their folders
+  [(s, FilePath)] ->
+  m (Map s [FilePattern])
+readIgnoreFilesForSources globalPats ignoreFile sources = do
+  fmap Map.fromList $ forM sources $ \(src, folder) -> do
+    effectivePats <- readIgnoreFileWithGlobalPats globalPats (folder </> ignoreFile)
+    pure (src, effectivePats)
+
 unionMount' ::
   forall source tag m m1.
   ( MonadIO m,
@@ -160,23 +185,27 @@ unionMount' ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
+  -- | Global ignore patterns
+  [FilePattern] ->
+  -- | Ignore file name
   Maybe FilePath ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignoreFile = do
-  let folders = toList $ Set.map (fst . snd) sources
-  ignore <- case ignoreFile of
-    Nothing -> pure []
-    Just file -> readIgnoreFile file folders
+unionMount' sources pats globalIgnorePats ignoreFile = do
+  let sourceFolders = toList $ Set.map (\(src, (folder, _)) -> (src, folder)) sources
+  sourceIgnorePats <- case ignoreFile of
+    Nothing -> pure $ Map.fromList [(src, globalIgnorePats) | (src, _) <- sourceFolders]
+    Just file -> readIgnoreFilesForSources globalIgnorePats file sourceFolders
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
         forM_ sources $ \(src, (folder, mountPoint)) -> do
-          taggedFiles <- filesMatchingWithTag folder pats ignore
+          let srcIgnore = fromMaybe [] $ Map.lookup src sourceIgnorePats
+          taggedFiles <- filesMatchingWithTag folder pats srcIgnore
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
               put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
@@ -199,7 +228,8 @@ unionMount' sources pats ignoreFile = do
                       =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
-                    let shouldIgnore = any (?== fp) ignore
+                    let srcIgnore = fromMaybe [] $ Map.lookup src sourceIgnorePats
+                        shouldIgnore = any (?== fp) srcIgnore
                     case actE of
                       Left _ -> do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"

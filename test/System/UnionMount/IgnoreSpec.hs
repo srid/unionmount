@@ -4,61 +4,66 @@
 
 module System.UnionMount.IgnoreSpec where
 
-import Data.Map.Strict qualified as Map
-import Data.Map.Syntax (MapSyntax, runMap, (##))
 import NeatInterpolation (text)
 import System.FilePath ((</>))
-import System.UnionMount.Ignore (readIgnoreFile)
+import System.UnionMount.Ignore (IgnorePattern (..), applyIgnorePatterns, readIgnoreFile)
 import Test.Hspec
 import UnliftIO.Temporary (withSystemTempDirectory)
 
 spec :: Spec
 spec = do
-  describe "readIgnoreFile" $ do
-    it "reads ignore patterns from a single file" $
-      testIgnoreFile ["*.log", "*.tmp"] do
-        "dir1" ## [text|
+  describe "readIgnoreFile" do
+    it "reads ignore patterns from a file" $
+      withSystemTempDirectory "ignore-test" \dir -> do
+        let ignoreFile = dir </> ".emanoteignore"
+        writeFile ignoreFile $
+          toString
+            [text|
           *.tmp
 
           # ignore log files
           *.log
 
         |]
+        patterns <- readIgnoreFile ignoreFile
+        patterns `shouldBe` [Ignore "*.tmp", Ignore "*.log"]
 
-    it "combines patterns from multiple sources" $
-      testIgnoreFile ["*.log", "*.tmp"] do
-        "dir1" ## "*.tmp"
-        "dir2" ## "*.log"
+    it "parses negation patterns" $
+      withSystemTempDirectory "ignore-test" \dir -> do
+        let ignoreFile = dir </> ".emanoteignore"
+        writeFile ignoreFile $
+          toString
+            [text|
+          *.tmp
+          !important.tmp
+          *.log
+        |]
+        patterns <- readIgnoreFile ignoreFile
+        patterns `shouldBe` [Ignore "*.tmp", UnIgnore "important.tmp", Ignore "*.log"]
 
-    it "skips sources without ignore file" $
-      testIgnoreFile ["*.tmp"] do
-        "dir1" ## "*.tmp"
-        "dir2" ## ""
+    it "returns empty list when file doesn't exist" $
+      withSystemTempDirectory "ignore-test" \dir -> do
+        let ignoreFile = dir </> ".emanoteignore"
+        patterns <- readIgnoreFile ignoreFile
+        patterns `shouldBe` []
 
-    it "returns empty list when no sources provided" $
-      testIgnoreFile [] mempty
+  describe "applyIgnorePatterns" do
+    it "appends Ignore patterns" do
+      let result = applyIgnorePatterns [".*"] [Ignore "*.tmp"]
+      result `shouldBe` [".*", "*.tmp"]
 
--- | Test helper that creates temp directories with ignore files and verifies the result
-testIgnoreFile :: [String] -> MapSyntax Text Text -> IO ()
-testIgnoreFile expected mapSyntax = case runMap mapSyntax of
-  Left dups -> expectationFailure $ "Duplicate keys: " <> show dups
-  Right sourcesToContent -> do
-    let sources = Map.keys sourcesToContent
-    withTempDirs (length sources) $ \dirs -> do
-      let dirMap = Map.fromList $ zip sources dirs
-      -- Write ignore files
-      forM_ (Map.toList sourcesToContent) $ \(source, content) -> do
-        let dir = dirMap Map.! source
-        when (content /= "") $
-          writeFile (dir </> ".ignore") (toString content)
-      -- Read and verify
-      patterns <- readIgnoreFile ".ignore" dirs
-      sort patterns `shouldBe` sort expected
+    it "removes patterns with UnIgnore" do
+      let result = applyIgnorePatterns [".*", "*.tmp"] [UnIgnore ".*"]
+      result `shouldBe` ["*.tmp"]
 
--- Helper functions
-withTempDirs :: Int -> ([FilePath] -> IO a) -> IO a
-withTempDirs n action = go n []
-  where
-    go 0 acc = action (reverse acc)
-    go count acc = withSystemTempDirectory "ignore-test" $ \dir ->
-      go (count - 1) (dir : acc)
+    it "combines Ignore and UnIgnore" do
+      let result = applyIgnorePatterns [".*"] [UnIgnore ".*", Ignore "*.tmp"]
+      result `shouldBe` ["*.tmp"]
+
+    it "handles empty global patterns" do
+      let result = applyIgnorePatterns [] [Ignore "*.tmp", Ignore "*.log"]
+      result `shouldBe` ["*.tmp", "*.log"]
+
+    it "handles empty local patterns" do
+      let result = applyIgnorePatterns [".*", "*.tmp"] []
+      result `shouldBe` [".*", "*.tmp"]
