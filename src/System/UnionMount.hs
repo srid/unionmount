@@ -107,11 +107,7 @@ unionMount ::
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
 unionMount sources pats ignoreFile model0 handleAction = do
-  let folders = toList $ Set.map (fst . snd) sources
-  ignores <- case ignoreFile of
-    Nothing -> pure []
-    Just file -> readIgnoreFile file folders
-  (x0, xf) <- unionMount' sources pats ignores ignoreFile
+  (x0, xf) <- unionMount' sources pats ignoreFile
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -164,14 +160,17 @@ unionMount' ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
-  Maybe FilePattern ->
+  Maybe FilePath ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore ignoreFile = do
+unionMount' sources pats ignoreFile = do
+  let folders = toList $ Set.map (fst . snd) sources
+  ignore <- case ignoreFile of
+    Nothing -> pure []
+    Just file -> readIgnoreFile file folders
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
