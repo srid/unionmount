@@ -33,6 +33,7 @@
               "--ghc-opt"
               "-XImportQualifiedPost"
             ];
+            excludes = [ "vira.hs" ];
           };
         };
 
