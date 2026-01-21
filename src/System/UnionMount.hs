@@ -17,12 +17,8 @@ module System.UnionMount
   )
 where
 
+import Colog.Core (LogAction, Severity (..), WithSeverity (..), (<&))
 import Control.Concurrent (threadDelay)
-import Control.Monad.Logger
-  ( LogLevel (LevelDebug, LevelError, LevelInfo, LevelWarn),
-    MonadLogger,
-    logWithoutLoc,
-  )
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -49,10 +45,11 @@ mount ::
   forall model m b.
   ( MonadIO m,
     MonadUnliftIO m,
-    MonadLogger m,
     Show b,
     Ord b
   ) =>
+  -- | Logger
+  LogAction m (WithSeverity Text) ->
   -- | The directory to mount.
   FilePath ->
   -- | Only include these files (exclude everything else)
@@ -71,10 +68,10 @@ mount ::
   -- If the action throws an exception, it will be logged and ignored.
   (b -> FilePath -> FileAction () -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-mount folder pats ignore var0 toAction' =
+mount logger folder pats ignore var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignore var0 $ \ch -> do
+   in unionMount logger sources pats ignore var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -95,29 +92,30 @@ unionMount ::
   forall source tag model m.
   ( MonadIO m,
     MonadUnliftIO m,
-    MonadLogger m,
     Ord source,
     Ord tag
   ) =>
+  -- | Logger
+  LogAction m (WithSeverity Text) ->
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignore
-  x0' <- interceptExceptions id $ handleAction x0
+unionMount logger sources pats ignore model0 handleAction = do
+  (x0, xf) <- unionMount' logger sources pats ignore
+  x0' <- interceptExceptions logger id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
   let sender send = do
         Cmd_Remount <- xf $ \change -> do
-          change' <- interceptExceptions id $ handleAction change
+          change' <- interceptExceptions logger id $ handleAction change
           LVar.modify lvar change'
           x <- LVar.get lvar
           send x
-        log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignore model0 handleAction
+        logger <& WithSeverity "Remounting..." Info
+        (a, b) <- unionMount logger sources pats ignore model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -125,11 +123,11 @@ unionMount sources pats ignore model0 handleAction = do
 -- Log and ignore exceptions
 --
 -- TODO: Make user define-able?
-interceptExceptions :: (MonadIO m, MonadUnliftIO m, MonadLogger m) => a -> m a -> m a
-interceptExceptions default_ f = do
+interceptExceptions :: (MonadIO m, MonadUnliftIO m) => LogAction m (WithSeverity Text) -> a -> m a -> m a
+interceptExceptions logger default_ f = do
   try f >>= \case
     Left (ex :: SomeException) -> do
-      log LevelError $ "Change handler exception: " <> show ex
+      logger <& WithSeverity ("Change handler exception: " <> show ex) Error
       pure default_
     Right v ->
       pure v
@@ -149,30 +147,29 @@ data Cmd
 
 -- | Like `unionMount` but without exception interrupting or re-mounting.
 unionMount' ::
-  forall source tag m m1.
+  forall source tag m.
   ( MonadIO m,
     MonadUnliftIO m,
-    MonadLogger m,
-    MonadLogger m1,
-    MonadIO m1,
     Ord source,
     Ord tag
   ) =>
+  -- | Logger
+  LogAction m (WithSeverity Text) ->
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
-  m1
+  m
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore = do
+unionMount' logger sources pats ignore = do
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
         forM_ sources $ \(src, (folder, mountPoint)) -> do
-          taggedFiles <- filesMatchingWithTag folder pats ignore
+          taggedFiles <- lift . lift $ filesMatchingWithTag logger folder pats ignore
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
               put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
@@ -183,7 +180,7 @@ unionMount' sources pats ignore = do
           -- Run fsnotify on sources
           q :: TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
           fmap (either id id) $
-            race (onChange q (toList sources)) $
+            race (onChange logger q (toList sources)) $
               let readDebounced = do
                     -- Wait for some initial action in the queue.
                     _ <- atomically $ readTMVar q
@@ -201,11 +198,11 @@ unionMount' sources pats ignore = do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
                         if shouldIgnore
                           then do
-                            log LevelWarn $ reason <> " on an ignored path"
+                            lift $ logger <& WithSeverity (reason <> " on an ignored path") Warning
                             loop
                           else do
                             -- We don't know yet how to deal with folder events. Just reboot the mount.
-                            log LevelWarn $ reason <> "; suggesting a re-mount"
+                            lift $ logger <& WithSeverity (reason <> "; suggesting a re-mount") Warning
                             pure Cmd_Remount -- Exit, asking user to remokunt
                       Right act -> do
                         case guard (not shouldIgnore) >> getTag pats fp of
@@ -218,17 +215,17 @@ unionMount' sources pats ignore = do
                in evalStateT loop ofs
       )
 
-filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
-filesMatching parent' pats ignore = do
+filesMatching :: (MonadIO m) => LogAction m (WithSeverity Text) -> FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
+filesMatching logger parent' pats ignore = do
   parent <- liftIO $ canonicalizePath parent'
-  log LevelInfo $ toText $ "Traversing " <> parent <> " for files matching " <> show pats <> ", ignoring " <> show ignore
+  logger <& WithSeverity (toText $ "Traversing " <> parent <> " for files matching " <> show pats <> ", ignoring " <> show ignore) Info
   liftIO $ getDirectoryFilesIgnore parent pats ignore
 
 -- | Like `filesMatching` but with a tag associated with a pattern so as to be
 -- able to tell which pattern a resulting filepath is associated with.
-filesMatchingWithTag :: (MonadIO m, MonadLogger m, Ord b) => FilePath -> [(b, FilePattern)] -> [FilePattern] -> m [(b, [FilePath])]
-filesMatchingWithTag parent' pats ignore = do
-  fs <- filesMatching parent' (snd <$> pats) ignore
+filesMatchingWithTag :: (MonadIO m, Ord b) => LogAction m (WithSeverity Text) -> FilePath -> [(b, FilePattern)] -> [FilePattern] -> m [(b, [FilePath])]
+filesMatchingWithTag logger parent' pats ignore = do
+  fs <- filesMatching logger parent' (snd <$> pats) ignore
   let m = Map.fromListWith (<>) $
         flip mapMaybe fs $ \fp -> do
           tag <- getTag pats fp
@@ -279,22 +276,23 @@ refreshAction = \case
 
 onChange ::
   forall x m.
-  (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
+  (Eq x, MonadIO m, MonadUnliftIO m) =>
+  LogAction m (WithSeverity Text) ->
   TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) ->
   [(x, (FilePath, Maybe FilePath))] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
   m Cmd
-onChange q roots = do
+onChange logger q roots = do
   withManagerM $ \mgr -> do
     stops <- forM roots $ \(x, (rootRel, mountPoint)) -> do
       -- NOTE: It is important to use canonical path, because this will allow us to
       -- transform fsnotify event's (absolute) path into one that is relative to
       -- @parent'@ (as passed by user), which is what @f@ will expect.
       root <- liftIO $ canonicalizePath rootRel
-      log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
+      logger <& WithSeverity (toText $ "Monitoring " <> root <> " for changes") Info
       watchTreeM mgr root (const True) $ \event -> do
-        log LevelDebug $ show event
+        logger <& WithSeverity (show event) Debug
         atomically $ do
           lastQ <- tryTakeTMVar q
           let fp = makeRelative root $ eventPath event
@@ -323,7 +321,7 @@ onChange q roots = do
                 (_, Just a) -> reAddQ >> f (Right a)
     liftIO (threadDelay maxBound)
       `finally` do
-        log LevelInfo "Stopping fsnotify monitor."
+        logger <& WithSeverity "Stopping fsnotify monitor." Info
         liftIO $ forM_ stops id
     -- Unreachable
     pure Cmd_Remount
@@ -347,9 +345,6 @@ watchTreeM ::
 watchTreeM wm fp pr f =
   withRunInIO $ \run ->
     watchTree wm fp pr $ \evt -> run (f evt)
-
-log :: (MonadLogger m) => LogLevel -> Text -> m ()
-log = logWithoutLoc "System.UnionMount"
 
 -- TODO: Abstract in module with StateT / MonadState
 newtype OverlayFs source = OverlayFs (Map FilePath (Set (source, FilePath)))

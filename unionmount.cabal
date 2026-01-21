@@ -29,6 +29,7 @@ common library-common
     , async
     , base          >=4.13.0 && <5
     , bytestring
+    , co-log-core
     , containers
     , data-default
     , directory
@@ -36,7 +37,6 @@ common library-common
     , filepattern
     , fsnotify      >=0.4.0  && <0.5
     , lvar
-    , monad-logger
     , mtl
     , relude
     , text
@@ -80,8 +80,6 @@ test-suite test
   build-depends:
     , dir-traverse
     , hspec
-    , monad-logger
-    , monad-logger-extras
     , relude
 
   if flag(ghcid)
