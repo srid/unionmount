@@ -14,7 +14,7 @@ import Relude.Unsafe qualified as Unsafe
 import System.Directory (createDirectory)
 import System.Directory.Recursive (getFilesRecursive)
 import System.FilePath ((</>))
-import System.FilePattern (FilePattern)
+import System.FilePattern (FilePattern, (?==))
 import System.UnionMount qualified as UM
 import Test.Hspec
 import UnliftIO (MonadUnliftIO)
@@ -25,7 +25,6 @@ import UnliftIO.Temporary (withSystemTempDirectory)
 
 spec :: Spec
 spec = do
-  -- TODO: Use QuickCheck to generate these.
   describe "unionmount" $ do
     it "basic" $ do
       unionMountSpec $
@@ -94,6 +93,57 @@ spec = do
                      writeFile "file3" "file3 is in first layer"
                  )
              ]
+    it "ignore patterns exclude matching files" $ do
+      unionMountSpecWith ["*.ignored"] $
+        one $
+          FolderMutation
+            Nothing
+            ( do
+                writeFile "keep.txt" "keep me"
+                writeFile "drop.ignored" "skip me"
+            )
+            ( do
+                writeFile "keep.txt" "keep me, again"
+                writeFile "also-drop.ignored" "also skip me"
+            )
+    it "delete from top layer reveals lower layer" $ do
+      unionMountSpec $
+        FolderMutation
+          Nothing
+          ( do
+              writeFile "shared" "from lower"
+          )
+          ( pass
+          )
+          :| [ FolderMutation
+                 Nothing
+                 ( do
+                     writeFile "shared" "from upper"
+                 )
+                 ( do
+                     removeFile "shared"
+                 )
+             ]
+  describe "unionMount tags" $ do
+    it "initial scan partitions files by tag pattern" $ do
+      withSystemTempDirectory "multitag" $ \dir -> do
+        writeFile (dir </> "a.md") "md content"
+        writeFile (dir </> "b.txt") "txt content"
+        writeFile (dir </> "c.other") "ignored by patterns"
+        let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
+            pats = [("md" :: String, "*.md"), ("txt", "*.txt")]
+        (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
+          UM.unionMount layers pats [] (mempty :: Map String (Set FilePath)) $ \change ->
+            pure $ \m0 ->
+              Map.foldrWithKey
+                (\tag files -> Map.insertWith Set.union tag (Map.keysSet files))
+                m0
+                change
+        model0
+          `shouldBe` Map.fromList
+            [ ("md", Set.singleton "a.md"),
+              ("txt", Set.singleton "b.txt")
+            ]
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -103,12 +153,24 @@ unionMountSpec ::
   -- | The folder mutations to test
   UnionFolderMutations ->
   Expectation
-unionMountSpec folders = do
+unionMountSpec = unionMountSpecWith ignoreNone
+
+-- | Like `unionMountSpec`, but with a caller-supplied ignore list that is
+-- passed to `UM.unionMount` and used to filter the IO-materialized expected
+-- model.
+unionMountSpecWith ::
+  [FilePattern] ->
+  UnionFolderMutations ->
+  Expectation
+unionMountSpecWith ignore folders = do
+  -- Compute the expected final state once, using separate temp directories.
+  rawExpected <- runUnionFolderMutations folders
+  let expected = Map.filterWithKey (\fp _ -> not (any (?== fp) ignore)) rawExpected
   withUnionFolderMutations folders $ \tempDirs -> do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignoreNone mempty $ \change -> do
+      (model0, patch) <- UM.unionMount layers allFiles ignore mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of
@@ -120,20 +182,46 @@ unionMountSpec folders = do
       LVar.set model model0
       race_
         (patch $ LVar.set model)
-        (withPaddedThreadDelay 500_000 $ updateUnionFolderMutations tempDirs)
+        ( do
+            -- The fsnotify watcher is set up lazily when the sender
+            -- (left side of `race_`) is invoked, so we give it a brief
+            -- head start before mutating files.
+            threadDelay fsnotifyWatcherSetupDelay
+            updateUnionFolderMutations tempDirs
+            -- Poll the model until it reflects the expected final state
+            -- (or we hit the timeout ceiling).
+            _ <- waitForModel model expected
+            pass
+        )
     finalModel <- LVar.get model
-    expected <- runUnionFolderMutations folders
     finalModel `shouldBe` expected
-    print expected
   where
-    -- NOTE: These timings may not be enough on a slow system.
-    withPaddedThreadDelay :: (MonadUnliftIO m) => Int -> m () -> m ()
-    withPaddedThreadDelay padding action = do
-      -- Wait for the initial model to be loaded.
-      threadDelay padding
-      action
-      -- Wait for fsnotify to handle events
-      threadDelay padding
+    -- Brief delay to give fsnotify watchers time to come online before we
+    -- mutate files. fsnotify provides no synchronous readiness signal.
+    fsnotifyWatcherSetupDelay :: Int
+    fsnotifyWatcherSetupDelay = 200_000 -- 200ms
+
+    -- Wait (up to the timeout) until the LVar matches the expected value.
+    -- Returns True if matched, False if we timed out.
+    waitForModel ::
+      (MonadUnliftIO m, Eq a) =>
+      LVar.LVar a ->
+      a ->
+      m Bool
+    waitForModel lv target = go modelWaitTimeout
+      where
+        pollInterval = 10_000 -- 10ms
+        modelWaitTimeout = 5_000_000 -- 5s ceiling; fast path exits on first match
+        go remaining = do
+          v <- LVar.get lv
+          if v == target
+            then pure True
+            else
+              if remaining <= 0
+                then pure False
+                else do
+                  threadDelay pollInterval
+                  go (remaining - pollInterval)
 
 -- | Represent the mutation of a folder over time.
 --

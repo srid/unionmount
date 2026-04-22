@@ -82,6 +82,7 @@ test-suite test
     , hspec
     , monad-logger
     , monad-logger-extras
+    , QuickCheck
     , relude
 
   if flag(ghcid)
@@ -89,4 +90,7 @@ test-suite test
 
   else
     build-depends: unionmount
-    other-modules: System.UnionMountSpec
+    other-modules:
+      System.UnionMount.PropSpec
+      System.UnionMount.UnitSpec
+      System.UnionMountSpec

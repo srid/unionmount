@@ -14,6 +14,12 @@ module System.UnionMount
 
     -- * For tests
     chainM,
+    getTag,
+    OverlayFs,
+    emptyOverlayFs,
+    overlayFsAdd,
+    overlayFsRemove,
+    overlayFsLookup,
   )
 where
 
