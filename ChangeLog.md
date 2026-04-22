@@ -1,5 +1,5 @@
 
-## 0.4.0.0
+## Unreleased
 
 - Broaden test coverage; expose pure internals as `System.UnionMount.Internal` (#15)
 
