@@ -1,6 +1,6 @@
 cabal-version:      2.4
 name:               unionmount
-version:            0.3.0.0
+version:            0.4.0.0
 license:            MIT
 copyright:          2021 Sridhar Ratnakumar
 maintainer:         srid@srid.ca
@@ -69,7 +69,10 @@ common library-common
 
 library
   import:          library-common
-  exposed-modules: System.UnionMount
+  exposed-modules:
+    System.UnionMount
+    System.UnionMount.Internal
+
   hs-source-dirs:  src
 
 test-suite test
@@ -82,6 +85,7 @@ test-suite test
     , hspec
     , monad-logger
     , monad-logger-extras
+    , QuickCheck
     , relude
 
   if flag(ghcid)
@@ -89,4 +93,7 @@ test-suite test
 
   else
     build-depends: unionmount
-    other-modules: System.UnionMountSpec
+    other-modules:
+      System.UnionMount.PropSpec
+      System.UnionMount.UnitSpec
+      System.UnionMountSpec

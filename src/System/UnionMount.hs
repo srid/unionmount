@@ -25,7 +25,6 @@ import Control.Monad.Logger
   )
 import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import System.Directory (canonicalizePath)
 import System.FSNotify
   ( ActionPredicate,
@@ -39,9 +38,17 @@ import System.FSNotify
     watchTree,
     withManagerConf,
   )
-import System.FilePath (isRelative, makeRelative, (</>))
+import System.FilePath (makeRelative, (</>))
 import System.FilePattern (FilePattern, (?==))
 import System.FilePattern.Directory (getDirectoryFilesIgnore)
+import System.UnionMount.Internal
+  ( OverlayFs,
+    emptyOverlayFs,
+    getTag,
+    overlayFsAdd,
+    overlayFsLookup,
+    overlayFsRemove,
+  )
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
 
 -- | Simplified version of `unionMount` with exactly one layer.
@@ -235,21 +242,6 @@ filesMatchingWithTag parent' pats ignore = do
           pure (tag, one fp)
   pure $ Map.toList m
 
-getTag :: [(b, FilePattern)] -> FilePath -> Maybe b
-getTag pats fp =
-  let pull patterns =
-        listToMaybe $
-          flip mapMaybe patterns $ \(tag, pat) -> do
-            guard $ pat ?== fp
-            pure tag
-   in if isRelative fp
-        then pull pats
-        else -- `fp` is an absolute path (because of use of symlinks), so let's
-        -- be more lenient in matching it. Note that this does meat we might
-        -- match files the user may not have originally intended. This is
-        -- the trade offs with using symlinks.
-          pull $ second ("**/" <>) <$> pats
-
 data RefreshAction
   = -- | No recent change. Just notifying of file's existance
     Existing
@@ -350,31 +342,6 @@ watchTreeM wm fp pr f =
 
 log :: (MonadLogger m) => LogLevel -> Text -> m ()
 log = logWithoutLoc "System.UnionMount"
-
--- TODO: Abstract in module with StateT / MonadState
-newtype OverlayFs source = OverlayFs (Map FilePath (Set (source, FilePath)))
-
--- TODO: Replace this with a function taking `NonEmpty source`
-emptyOverlayFs :: (Ord source) => OverlayFs source
-emptyOverlayFs = OverlayFs mempty
-
-overlayFsModify :: FilePath -> (Set (src, FilePath) -> Set (src, FilePath)) -> OverlayFs src -> OverlayFs src
-overlayFsModify k f (OverlayFs m) =
-  OverlayFs $
-    Map.insert k (f $ fromMaybe Set.empty $ Map.lookup k m) m
-
-overlayFsAdd :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
-overlayFsAdd fp src =
-  overlayFsModify fp $ Set.insert src
-
-overlayFsRemove :: (Ord src) => FilePath -> (src, FilePath) -> OverlayFs src -> OverlayFs src
-overlayFsRemove fp src =
-  overlayFsModify fp $ Set.delete src
-
-overlayFsLookup :: FilePath -> OverlayFs source -> Maybe (NonEmpty ((source, FilePath), FilePath))
-overlayFsLookup fp (OverlayFs m) = do
-  sources <- nonEmpty . toList =<< Map.lookup fp m
-  pure $ sources <&> (,fp)
 
 -- Files matched by each tag pattern, each represented by their corresponding
 -- file (absolute path) in the individual sources. It is up to the user to union

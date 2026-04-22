@@ -1,4 +1,8 @@
 
+## Unreleased
+
+- Broaden test coverage; expose pure internals as `System.UnionMount.Internal` (#15)
+
 ## 0.3.0.0
 
 - Support for custom mount points (#6)
