@@ -5,6 +5,7 @@ module System.UnionMount
   ( -- * Mount endpoints
     mount,
     unionMount,
+    unionMountStreaming,
     unionMount',
 
     -- * Types
@@ -121,6 +122,63 @@ unionMount sources pats ignore model0 handleAction = do
         send a
         b send
   pure (x0' model0, sender)
+
+{- | Streaming variant of 'unionMount'.
+
+Where 'unionMount' asks the handler to produce a single
+@model -> model@ for the whole batch — which on a multi-thousand-file
+initial mount forces the whole batch's worth of per-file closures (and
+whatever they capture, e.g. parsed Pandoc trees) to be alive
+simultaneously — this variant takes a handler that consumes the
+current model directly and returns the next one. The handler can then
+fold per-file updates through the model one at a time, so each file's
+closure is GC'd as soon as it has been applied.
+
+Caller-side, the typical pattern inside the handler is:
+
+@
+\\change initial -> foldlM step initial (changeToList change)
+  where step m c = do { f <- perFileHandler c; pure $! f m }
+@
+
+This is the lever for downstream large-notebook memory issues
+(see @srid/emanote#66@): once the initial-batch closures stop being
+retained, the per-file model only ever has one parsed Pandoc tree
+in flight instead of a whole batch's worth.
+
+Re-mounts and incremental fsnotify updates use the same handler;
+those paths only ever supply one file's worth of change at a time, so
+the streaming behaviour is a no-op for them.
+-}
+unionMountStreaming ::
+  forall source tag model m.
+  ( MonadIO m,
+    MonadUnliftIO m,
+    MonadLogger m,
+    Ord source,
+    Ord tag
+  ) =>
+  Set (source, (FilePath, Maybe FilePath)) ->
+  [(tag, FilePattern)] ->
+  [FilePattern] ->
+  model ->
+  (Change source tag -> model -> m model) ->
+  m (model, (model -> m ()) -> m ())
+unionMountStreaming sources pats ignore model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats ignore
+  initial <- interceptExceptions model0 $ handleAction x0 model0
+  lvar <- LVar.new initial
+  let sender send = do
+        Cmd_Remount <- xf $ \change -> do
+          old <- LVar.get lvar
+          new <- interceptExceptions old $ handleAction change old
+          LVar.set lvar new
+          send new
+        log LevelInfo "Remounting..."
+        (a, b) <- unionMountStreaming sources pats ignore model0 handleAction
+        send a
+        b send
+  pure (initial, sender)
 
 -- Log and ignore exceptions
 --
