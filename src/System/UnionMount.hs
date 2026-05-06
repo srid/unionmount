@@ -81,7 +81,7 @@ mount ::
 mount folder pats ignore var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignore var0 $ \ch -> do
+   in unionMount sources pats ignore Map.empty var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -98,6 +98,21 @@ chainM f =
     chain = flip $ foldl' $ flip ($)
 
 -- | Union mount a set of sources (directories) into a model.
+--
+-- Two ignore inputs are accepted:
+--
+-- * The flat @[FilePattern]@ list applies to every source. Use it for
+--   universal patterns (e.g. dotfile directories, editor backup files) that
+--   should never be visible to the model regardless of which layer they
+--   live in.
+--
+-- * The @Map source [FilePattern]@ scopes patterns to a single source. A
+--   pattern listed under source @A@ only suppresses files inside @A@ — it
+--   does not affect files matching the same path inside any other source.
+--   This is the right home for layer-private ignores (e.g. patterns loaded
+--   from a per-layer ignore file).
+--
+-- For sources missing from the per-source map, only the global list applies.
 unionMount ::
   forall source tag model m.
   ( MonadIO m,
@@ -108,12 +123,16 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
+  -- | Global ignore patterns (applied to every source).
   [FilePattern] ->
+  -- | Per-source ignore patterns (applied only to the source they are keyed
+  -- under).
+  Map source [FilePattern] ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignore
+unionMount sources pats ignore perSourceIgnore model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats ignore perSourceIgnore
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -124,7 +143,7 @@ unionMount sources pats ignore model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignore model0 handleAction
+        (a, b) <- unionMount sources pats ignore perSourceIgnore model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -168,18 +187,19 @@ unionMount' ::
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
   [FilePattern] ->
+  Map source [FilePattern] ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore = do
+unionMount' sources pats ignore perSourceIgnore = do
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
         forM_ sources $ \(src, (folder, mountPoint)) -> do
-          taggedFiles <- filesMatchingWithTag folder pats ignore
+          taggedFiles <- filesMatchingWithTag folder pats (ignoreFor src)
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
               put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
@@ -202,7 +222,7 @@ unionMount' sources pats ignore = do
                       =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
-                    let shouldIgnore = any (?== fp) ignore
+                    let shouldIgnore = any (?== fp) (ignoreFor src)
                     case actE of
                       Left _ -> do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
@@ -224,6 +244,9 @@ unionMount' sources pats ignore = do
                             loop
                in evalStateT loop ofs
       )
+  where
+    ignoreFor :: source -> [FilePattern]
+    ignoreFor src = ignore <> Map.findWithDefault [] src perSourceIgnore
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
 filesMatching parent' pats ignore = do

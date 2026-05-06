@@ -1,6 +1,7 @@
 
 ## Unreleased
 
+- Add per-source ignore patterns to `unionMount`. The new `Map source [FilePattern]` parameter scopes ignores to a single source, fixing the cross-source coupling where one layer's ignore list would silently hide matching files in other layers. Callers who only need universal ignores can pass an empty map. **Breaking change.**
 - Broaden test coverage; expose pure internals as `System.UnionMount.Internal` (#15)
 
 ## 0.3.0.0

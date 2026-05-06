@@ -133,7 +133,7 @@ spec = do
         let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
             pats = [("md" :: String, "*.md"), ("txt", "*.txt")]
         (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
-          UM.unionMount layers pats [] (mempty :: Map String (Set FilePath)) $ \change ->
+          UM.unionMount layers pats [] mempty (mempty :: Map String (Set FilePath)) $ \change ->
             pure $ \m0 ->
               Map.foldrWithKey
                 (\tag files -> Map.insertWith Set.union tag (Map.keysSet files))
@@ -144,6 +144,42 @@ spec = do
             [ ("md", Set.singleton "a.md"),
               ("txt", Set.singleton "b.txt")
             ]
+    it "per-source ignore patterns are scoped to their source" $ do
+      -- Two sibling sources each contain a "secret.txt". An ignore pattern
+      -- keyed under source A must hide A's copy without hiding B's copy.
+      withSystemTempDirectory "perSourceA" $ \dirA ->
+        withSystemTempDirectory "perSourceB" $ \dirB -> do
+          writeFile (dirA </> "secret.txt") "from A"
+          writeFile (dirA </> "public.txt") "A is public"
+          writeFile (dirB </> "secret.txt") "from B"
+          let layers =
+                Set.fromList
+                  [ ("A" :: String, (dirA, Nothing)),
+                    ("B", (dirB, Nothing))
+                  ]
+              pats = [((), "*.txt")]
+              perSource = Map.singleton "A" ["secret.txt"]
+          (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
+            UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $ \change ->
+              pure $ \m0 ->
+                Map.foldrWithKey
+                  ( \_tag files acc ->
+                      Map.foldrWithKey
+                        ( \fp act ->
+                            case act of
+                              UM.Refresh _ srcs ->
+                                Map.insert fp (NE.toList $ fst <$> srcs)
+                              UM.Delete -> Map.delete fp
+                        )
+                        acc
+                        files
+                  )
+                  m0
+                  change
+          -- A's secret.txt is hidden; B's secret.txt is the only contributor
+          -- to the union entry. A's public.txt is unaffected.
+          Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
+          Map.lookup "public.txt" model0 `shouldBe` Just ["A"]
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -170,7 +206,7 @@ unionMountSpecWith ignore folders = do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignore mempty $ \change -> do
+      (model0, patch) <- UM.unionMount layers allFiles ignore mempty mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of
