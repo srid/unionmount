@@ -161,21 +161,7 @@ spec = do
               perSource = Map.singleton "A" ["secret.txt"]
           (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
             UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $ \change ->
-              pure $ \m0 ->
-                Map.foldrWithKey
-                  ( \_tag files acc ->
-                      Map.foldrWithKey
-                        ( \fp act ->
-                            case act of
-                              UM.Refresh _ srcs ->
-                                Map.insert fp (NE.toList $ fst <$> srcs)
-                              UM.Delete -> Map.delete fp
-                        )
-                        acc
-                        files
-                  )
-                  m0
-                  change
+              pure $ foldChangeBySource change
           -- A's secret.txt is hidden; B's secret.txt is the only contributor
           -- to the union entry. A's public.txt is unaffected.
           Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
@@ -193,27 +179,11 @@ spec = do
                   ]
               pats = [((), "*.txt")]
               perSource = Map.singleton "A" ["secret.txt"]
-              fold0 :: UM.Change String () -> Map FilePath [String] -> Map FilePath [String]
-              fold0 ch m0 =
-                Map.foldrWithKey
-                  ( \_tag files acc ->
-                      Map.foldrWithKey
-                        ( \fp act ->
-                            case act of
-                              UM.Refresh _ srcs ->
-                                Map.insert fp (NE.toList $ fst <$> srcs)
-                              UM.Delete -> Map.delete fp
-                        )
-                        acc
-                        files
-                  )
-                  m0
-                  ch
           model <- LVar.empty
           flip runLoggerLoggingT logToNowhere $ do
             (model0, patch) <-
               UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $
-                \change -> pure $ fold0 change
+                \change -> pure $ foldChangeBySource change
             LVar.set model model0
             race_
               (patch $ LVar.set model)
@@ -284,6 +254,31 @@ unionMountSpecWith ignore folders = do
         )
     finalModel <- LVar.get model
     finalModel `shouldBe` expected
+
+-- | Project a `UM.Change source ()` into a flat `Map FilePath [source]`
+-- — one entry per resulting filepath, listing the sources that contribute
+-- to it. Used by the per-source-ignore tests to assert which layers a
+-- given path is sourced from after the mount converges.
+foldChangeBySource ::
+  (Ord source) =>
+  UM.Change source () ->
+  Map FilePath [source] ->
+  Map FilePath [source]
+foldChangeBySource ch m0 =
+  Map.foldrWithKey
+    ( \_tag files acc ->
+        Map.foldrWithKey
+          ( \fp act ->
+              case act of
+                UM.Refresh _ srcs ->
+                  Map.insert fp (NE.toList $ fst <$> srcs)
+                UM.Delete -> Map.delete fp
+          )
+          acc
+          files
+    )
+    m0
+    ch
 
 -- | Brief delay to give fsnotify watchers time to come online before we
 -- mutate files. fsnotify provides no synchronous readiness signal.
