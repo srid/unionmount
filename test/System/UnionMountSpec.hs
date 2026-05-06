@@ -218,8 +218,7 @@ spec = do
             race_
               (patch $ LVar.set model)
               ( do
-                  -- Give fsnotify time to attach watches before mutating.
-                  threadDelay 200_000
+                  threadDelay fsnotifyWatcherSetupDelay
                   writeFile (dirA </> "secret.txt") "from A (live)"
                   writeFile (dirA </> "public.txt") "A is public (live)"
                   writeFile (dirB </> "secret.txt") "from B (live)"
@@ -228,30 +227,12 @@ spec = do
                           [ ("secret.txt", ["B"]),
                             ("public.txt", ["A"])
                           ]
-                  _ <- waitForExact model target
+                  _ <- waitForModel model target
                   pass
               )
           finalModel <- LVar.get model
           Map.lookup "secret.txt" finalModel `shouldBe` Just ["B"]
           Map.lookup "public.txt" finalModel `shouldBe` Just ["A"]
-  where
-    waitForExact ::
-      (MonadUnliftIO m) =>
-      LVar.LVar (Map FilePath [String]) ->
-      Map FilePath [String] ->
-      m Bool
-    waitForExact lv target = go (5_000_000 :: Int)
-      where
-        go remaining = do
-          v <- LVar.get lv
-          if v == target
-            then pure True
-            else
-              if remaining <= 0
-                then pure False
-                else do
-                  threadDelay 10_000
-                  go (remaining - 10_000)
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -303,33 +284,33 @@ unionMountSpecWith ignore folders = do
         )
     finalModel <- LVar.get model
     finalModel `shouldBe` expected
-  where
-    -- Brief delay to give fsnotify watchers time to come online before we
-    -- mutate files. fsnotify provides no synchronous readiness signal.
-    fsnotifyWatcherSetupDelay :: Int
-    fsnotifyWatcherSetupDelay = 200_000 -- 200ms
 
-    -- Wait (up to the timeout) until the LVar matches the expected value.
-    -- Returns True if matched, False if we timed out.
-    waitForModel ::
-      (MonadUnliftIO m, Eq a) =>
-      LVar.LVar a ->
-      a ->
-      m Bool
-    waitForModel lv target = go modelWaitTimeout
-      where
-        pollInterval = 10_000 -- 10ms
-        modelWaitTimeout = 5_000_000 -- 5s ceiling; fast path exits on first match
-        go remaining = do
-          v <- LVar.get lv
-          if v == target
-            then pure True
-            else
-              if remaining <= 0
-                then pure False
-                else do
-                  threadDelay pollInterval
-                  go (remaining - pollInterval)
+-- | Brief delay to give fsnotify watchers time to come online before we
+-- mutate files. fsnotify provides no synchronous readiness signal.
+fsnotifyWatcherSetupDelay :: Int
+fsnotifyWatcherSetupDelay = 200_000 -- 200ms
+
+-- | Wait (up to the timeout) until the LVar matches the expected value.
+-- Returns True if matched, False if we timed out.
+waitForModel ::
+  (MonadUnliftIO m, Eq a) =>
+  LVar.LVar a ->
+  a ->
+  m Bool
+waitForModel lv target = go modelWaitTimeout
+  where
+    pollInterval = 10_000 -- 10ms
+    modelWaitTimeout = 5_000_000 -- 5s ceiling; fast path exits on first match
+    go remaining = do
+      v <- LVar.get lv
+      if v == target
+        then pure True
+        else
+          if remaining <= 0
+            then pure False
+            else do
+              threadDelay pollInterval
+              go (remaining - pollInterval)
 
 -- | Represent the mutation of a folder over time.
 --
