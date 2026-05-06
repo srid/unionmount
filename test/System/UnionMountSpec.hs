@@ -133,7 +133,7 @@ spec = do
         let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
             pats = [("md" :: String, "*.md"), ("txt", "*.txt")]
         (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
-          UM.unionMount layers pats [] (mempty :: Map String (Set FilePath)) $ \change ->
+          UM.unionMount layers pats mempty (mempty :: Map String (Set FilePath)) $ \change ->
             pure $ \m0 ->
               Map.foldrWithKey
                 (\tag files -> Map.insertWith Set.union tag (Map.keysSet files))
@@ -144,6 +144,61 @@ spec = do
             [ ("md", Set.singleton "a.md"),
               ("txt", Set.singleton "b.txt")
             ]
+    it "per-source ignore patterns are scoped to their source" $ do
+      withSystemTempDirectory "perSourceA" $ \dirA ->
+        withSystemTempDirectory "perSourceB" $ \dirB -> do
+          writeFile (dirA </> "secret.txt") "from A"
+          writeFile (dirA </> "public.txt") "A is public"
+          writeFile (dirB </> "secret.txt") "from B"
+          let layers =
+                Set.fromList
+                  [ ("A" :: String, (dirA, Nothing)),
+                    ("B", (dirB, Nothing))
+                  ]
+              pats = [((), "*.txt")]
+              perSource = Map.singleton "A" ["secret.txt"]
+          (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
+            UM.unionMount layers pats perSource (mempty :: Map FilePath [String]) $ \change ->
+              pure $ foldChangeBySource change
+          Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
+          Map.lookup "public.txt" model0 `shouldBe` Just ["A"]
+    it "per-source ignore patterns also gate live fsnotify events" $ do
+      -- Same shape as above, but the ignored file is created *after* the
+      -- mount is live, exercising the fsnotify loop's ignoreFor check
+      -- rather than the initial directory scan.
+      withSystemTempDirectory "perSourceLiveA" $ \dirA ->
+        withSystemTempDirectory "perSourceLiveB" $ \dirB -> do
+          let layers =
+                Set.fromList
+                  [ ("A" :: String, (dirA, Nothing)),
+                    ("B", (dirB, Nothing))
+                  ]
+              pats = [((), "*.txt")]
+              perSource = Map.singleton "A" ["secret.txt"]
+          model <- LVar.empty
+          flip runLoggerLoggingT logToNowhere $ do
+            (model0, patch) <-
+              UM.unionMount layers pats perSource (mempty :: Map FilePath [String]) $
+                \change -> pure $ foldChangeBySource change
+            LVar.set model model0
+            race_
+              (patch $ LVar.set model)
+              ( do
+                  threadDelay fsnotifyWatcherSetupDelay
+                  writeFile (dirA </> "secret.txt") "from A (live)"
+                  writeFile (dirA </> "public.txt") "A is public (live)"
+                  writeFile (dirB </> "secret.txt") "from B (live)"
+                  let target =
+                        Map.fromList
+                          [ ("secret.txt", ["B"]),
+                            ("public.txt", ["A"])
+                          ]
+                  _ <- waitForModel model target
+                  pass
+              )
+          finalModel <- LVar.get model
+          Map.lookup "secret.txt" finalModel `shouldBe` Just ["B"]
+          Map.lookup "public.txt" finalModel `shouldBe` Just ["A"]
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
@@ -170,7 +225,8 @@ unionMountSpecWith ignore folders = do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignore mempty $ \change -> do
+          perSourceIgnore = Map.fromSet (const ignore) (Set.map fst layers)
+      (model0, patch) <- UM.unionMount layers allFiles perSourceIgnore mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of
@@ -195,33 +251,58 @@ unionMountSpecWith ignore folders = do
         )
     finalModel <- LVar.get model
     finalModel `shouldBe` expected
-  where
-    -- Brief delay to give fsnotify watchers time to come online before we
-    -- mutate files. fsnotify provides no synchronous readiness signal.
-    fsnotifyWatcherSetupDelay :: Int
-    fsnotifyWatcherSetupDelay = 200_000 -- 200ms
 
-    -- Wait (up to the timeout) until the LVar matches the expected value.
-    -- Returns True if matched, False if we timed out.
-    waitForModel ::
-      (MonadUnliftIO m, Eq a) =>
-      LVar.LVar a ->
-      a ->
-      m Bool
-    waitForModel lv target = go modelWaitTimeout
-      where
-        pollInterval = 10_000 -- 10ms
-        modelWaitTimeout = 5_000_000 -- 5s ceiling; fast path exits on first match
-        go remaining = do
-          v <- LVar.get lv
-          if v == target
-            then pure True
-            else
-              if remaining <= 0
-                then pure False
-                else do
-                  threadDelay pollInterval
-                  go (remaining - pollInterval)
+-- | Project a `UM.Change source ()` into a flat `Map FilePath [source]`
+-- — one entry per resulting filepath, listing the sources that contribute
+-- to it. Used by the per-source-ignore tests to assert which layers a
+-- given path is sourced from after the mount converges.
+foldChangeBySource ::
+  (Ord source) =>
+  UM.Change source () ->
+  Map FilePath [source] ->
+  Map FilePath [source]
+foldChangeBySource ch m0 =
+  Map.foldrWithKey
+    ( \_tag files acc ->
+        Map.foldrWithKey
+          ( \fp act ->
+              case act of
+                UM.Refresh _ srcs ->
+                  Map.insert fp (NE.toList $ fst <$> srcs)
+                UM.Delete -> Map.delete fp
+          )
+          acc
+          files
+    )
+    m0
+    ch
+
+-- | Brief delay to give fsnotify watchers time to come online before we
+-- mutate files. fsnotify provides no synchronous readiness signal.
+fsnotifyWatcherSetupDelay :: Int
+fsnotifyWatcherSetupDelay = 200_000 -- 200ms
+
+-- | Wait (up to the timeout) until the LVar matches the expected value.
+-- Returns True if matched, False if we timed out.
+waitForModel ::
+  (MonadUnliftIO m, Eq a) =>
+  LVar.LVar a ->
+  a ->
+  m Bool
+waitForModel lv target = go modelWaitTimeout
+  where
+    pollInterval = 10_000 -- 10ms
+    modelWaitTimeout = 5_000_000 -- 5s ceiling; fast path exits on first match
+    go remaining = do
+      v <- LVar.get lv
+      if v == target
+        then pure True
+        else
+          if remaining <= 0
+            then pure False
+            else do
+              threadDelay pollInterval
+              go (remaining - pollInterval)
 
 -- | Represent the mutation of a folder over time.
 --

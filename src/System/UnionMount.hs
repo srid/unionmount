@@ -81,7 +81,7 @@ mount ::
 mount folder pats ignore var0 toAction' =
   let tag0 = ()
       sources = one (tag0, (folder, Nothing))
-   in unionMount sources pats ignore var0 $ \ch -> do
+   in unionMount sources pats (Map.singleton tag0 ignore) var0 $ \ch -> do
         let fsSet = (fmap . fmap . fmap . fmap) void $ fmap Map.toList <$> Map.toList ch
         (\(tag, xs) -> uncurry (toAction' tag) `chainM` xs) `chainM` fsSet
   where
@@ -98,6 +98,13 @@ chainM f =
     chain = flip $ foldl' $ flip ($)
 
 -- | Union mount a set of sources (directories) into a model.
+--
+-- Ignore patterns are scoped to the source they are keyed under: a
+-- pattern listed for source @A@ only suppresses files inside @A@ and
+-- does not affect files matching the same path inside any other
+-- source. Sources absent from the map see no ignore patterns. To
+-- apply a pattern to every source (a "universal" ignore), key it
+-- under every source.
 unionMount ::
   forall source tag model m.
   ( MonadIO m,
@@ -108,12 +115,13 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
+  -- | Per-source ignore patterns.
+  Map source [FilePattern] ->
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats ignore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats ignore
+unionMount sources pats perSourceIgnore model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats perSourceIgnore
   x0' <- interceptExceptions id $ handleAction x0
   let initial = x0' model0
   lvar <- LVar.new initial
@@ -124,7 +132,7 @@ unionMount sources pats ignore model0 handleAction = do
           x <- LVar.get lvar
           send x
         log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats ignore model0 handleAction
+        (a, b) <- unionMount sources pats perSourceIgnore model0 handleAction
         send a
         b send
   pure (x0' model0, sender)
@@ -167,19 +175,19 @@ unionMount' ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  [FilePattern] ->
+  Map source [FilePattern] ->
   m1
     ( Change source tag,
       (Change source tag -> m ()) ->
       m Cmd
     )
-unionMount' sources pats ignore = do
+unionMount' sources pats perSourceIgnore = do
   flip evalStateT (emptyOverlayFs @source) $ do
     -- Initial traversal of sources
     changes0 :: Change source tag <-
       fmap snd . flip runStateT Map.empty $ do
         forM_ sources $ \(src, (folder, mountPoint)) -> do
-          taggedFiles <- filesMatchingWithTag folder pats ignore
+          taggedFiles <- filesMatchingWithTag folder pats (ignoreFor src)
           forM_ taggedFiles $ \(tag, fs) -> do
             forM_ fs $ \fp -> do
               put =<< lift . changeInsert src tag mountPoint fp (Refresh Existing ()) =<< get
@@ -202,7 +210,7 @@ unionMount' sources pats ignore = do
                       =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
-                    let shouldIgnore = any (?== fp) ignore
+                    let shouldIgnore = any (?== fp) (ignoreFor src)
                     case actE of
                       Left _ -> do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
@@ -224,6 +232,9 @@ unionMount' sources pats ignore = do
                             loop
                in evalStateT loop ofs
       )
+  where
+    ignoreFor :: source -> [FilePattern]
+    ignoreFor src = Map.findWithDefault [] src perSourceIgnore
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
 filesMatching parent' pats ignore = do
