@@ -145,8 +145,6 @@ spec = do
               ("txt", Set.singleton "b.txt")
             ]
     it "per-source ignore patterns are scoped to their source" $ do
-      -- Two sibling sources each contain a "secret.txt". An ignore pattern
-      -- keyed under source A must hide A's copy without hiding B's copy.
       withSystemTempDirectory "perSourceA" $ \dirA ->
         withSystemTempDirectory "perSourceB" $ \dirB -> do
           writeFile (dirA </> "secret.txt") "from A"
@@ -162,8 +160,6 @@ spec = do
           (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
             UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $ \change ->
               pure $ foldChangeBySource change
-          -- A's secret.txt is hidden; B's secret.txt is the only contributor
-          -- to the union entry. A's public.txt is unaffected.
           Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
           Map.lookup "public.txt" model0 `shouldBe` Just ["A"]
     it "per-source ignore patterns also gate live fsnotify events" $ do
