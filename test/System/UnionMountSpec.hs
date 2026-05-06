@@ -133,7 +133,7 @@ spec = do
         let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
             pats = [("md" :: String, "*.md"), ("txt", "*.txt")]
         (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
-          UM.unionMount layers pats [] mempty (mempty :: Map String (Set FilePath)) $ \change ->
+          UM.unionMount layers pats mempty (mempty :: Map String (Set FilePath)) $ \change ->
             pure $ \m0 ->
               Map.foldrWithKey
                 (\tag files -> Map.insertWith Set.union tag (Map.keysSet files))
@@ -158,7 +158,7 @@ spec = do
               pats = [((), "*.txt")]
               perSource = Map.singleton "A" ["secret.txt"]
           (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
-            UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $ \change ->
+            UM.unionMount layers pats perSource (mempty :: Map FilePath [String]) $ \change ->
               pure $ foldChangeBySource change
           Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
           Map.lookup "public.txt" model0 `shouldBe` Just ["A"]
@@ -178,7 +178,7 @@ spec = do
           model <- LVar.empty
           flip runLoggerLoggingT logToNowhere $ do
             (model0, patch) <-
-              UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $
+              UM.unionMount layers pats perSource (mempty :: Map FilePath [String]) $
                 \change -> pure $ foldChangeBySource change
             LVar.set model model0
             race_
@@ -225,7 +225,8 @@ unionMountSpecWith ignore folders = do
     model <- LVar.empty
     flip runLoggerLoggingT logToNowhere $ do
       let layers = Set.fromList $ toList tempDirs <&> \(folder, path) -> (path, (path, _folderMountPoint folder))
-      (model0, patch) <- UM.unionMount layers allFiles ignore mempty mempty $ \change -> do
+          perSourceIgnore = Map.fromSet (const ignore) (Set.map fst layers)
+      (model0, patch) <- UM.unionMount layers allFiles perSourceIgnore mempty $ \change -> do
         let files = Unsafe.fromJust $ Map.lookup () change
         flip UM.chainM (Map.toList files) $ \(fp, act) -> do
           case act of
