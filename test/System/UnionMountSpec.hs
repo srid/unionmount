@@ -180,6 +180,78 @@ spec = do
           -- to the union entry. A's public.txt is unaffected.
           Map.lookup "secret.txt" model0 `shouldBe` Just ["B"]
           Map.lookup "public.txt" model0 `shouldBe` Just ["A"]
+    it "per-source ignore patterns also gate live fsnotify events" $ do
+      -- Same shape as above, but the ignored file is created *after* the
+      -- mount is live, exercising the fsnotify loop's ignoreFor check
+      -- rather than the initial directory scan.
+      withSystemTempDirectory "perSourceLiveA" $ \dirA ->
+        withSystemTempDirectory "perSourceLiveB" $ \dirB -> do
+          let layers =
+                Set.fromList
+                  [ ("A" :: String, (dirA, Nothing)),
+                    ("B", (dirB, Nothing))
+                  ]
+              pats = [((), "*.txt")]
+              perSource = Map.singleton "A" ["secret.txt"]
+              fold0 :: UM.Change String () -> Map FilePath [String] -> Map FilePath [String]
+              fold0 ch m0 =
+                Map.foldrWithKey
+                  ( \_tag files acc ->
+                      Map.foldrWithKey
+                        ( \fp act ->
+                            case act of
+                              UM.Refresh _ srcs ->
+                                Map.insert fp (NE.toList $ fst <$> srcs)
+                              UM.Delete -> Map.delete fp
+                        )
+                        acc
+                        files
+                  )
+                  m0
+                  ch
+          model <- LVar.empty
+          flip runLoggerLoggingT logToNowhere $ do
+            (model0, patch) <-
+              UM.unionMount layers pats [] perSource (mempty :: Map FilePath [String]) $
+                \change -> pure $ fold0 change
+            LVar.set model model0
+            race_
+              (patch $ LVar.set model)
+              ( do
+                  -- Give fsnotify time to attach watches before mutating.
+                  threadDelay 200_000
+                  writeFile (dirA </> "secret.txt") "from A (live)"
+                  writeFile (dirA </> "public.txt") "A is public (live)"
+                  writeFile (dirB </> "secret.txt") "from B (live)"
+                  let target =
+                        Map.fromList
+                          [ ("secret.txt", ["B"]),
+                            ("public.txt", ["A"])
+                          ]
+                  _ <- waitForExact model target
+                  pass
+              )
+          finalModel <- LVar.get model
+          Map.lookup "secret.txt" finalModel `shouldBe` Just ["B"]
+          Map.lookup "public.txt" finalModel `shouldBe` Just ["A"]
+  where
+    waitForExact ::
+      (MonadUnliftIO m) =>
+      LVar.LVar (Map FilePath [String]) ->
+      Map FilePath [String] ->
+      m Bool
+    waitForExact lv target = go (5_000_000 :: Int)
+      where
+        go remaining = do
+          v <- LVar.get lv
+          if v == target
+            then pure True
+            else
+              if remaining <= 0
+                then pure False
+                else do
+                  threadDelay 10_000
+                  go (remaining - 10_000)
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
