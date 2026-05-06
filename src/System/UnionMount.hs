@@ -123,10 +123,16 @@ unionMount ::
   ) =>
   Set (source, (FilePath, Maybe FilePath)) ->
   [(tag, FilePattern)] ->
-  -- | Global ignore patterns (applied to every source).
+  -- | Global ignore patterns. Applied to every source. Reserve this for
+  -- patterns that genuinely apply to all sources (e.g. dotfile dirs,
+  -- editor backup files); anything layer-specific belongs in the
+  -- per-source map below.
   [FilePattern] ->
-  -- | Per-source ignore patterns (applied only to the source they are keyed
-  -- under).
+  -- | Per-source ignore patterns. The list keyed under source @s@ only
+  -- suppresses files inside @s@. Sources missing from the map see only
+  -- the global list. Patterns are merged with the global list, so
+  -- duplicating a global pattern here has no extra effect — keep each
+  -- pattern in exactly one of the two parameters to avoid confusion.
   Map source [FilePattern] ->
   model ->
   (Change source tag -> m (model -> model)) ->
