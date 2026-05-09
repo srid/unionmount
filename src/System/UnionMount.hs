@@ -5,6 +5,7 @@ module System.UnionMount
   ( -- * Mount endpoints
     mount,
     unionMount,
+    unionMountStreaming,
     unionMount',
 
     -- * Types
@@ -136,6 +137,78 @@ unionMount sources pats perSourceIgnore model0 handleAction = do
         send a
         b send
   pure (x0' model0, sender)
+
+-- | Streaming variant of 'unionMount' whose handler reads the current model.
+--
+-- 'unionMount' takes a handler of shape @Change -> m (model -> model)@:
+-- the handler returns a transformer that the library applies to the
+-- running model. Two consequences fall out of that shape and motivate
+-- this variant.
+--
+-- * On a multi-thousand-file initial mount the whole batch's worth of
+--  per-file closures (and whatever they capture, e.g. parsed Pandoc
+--  trees) stays alive until the final fold runs — pinning peak memory
+--  on the order of the entire batch.
+-- * The handler cannot read the running model when it computes the
+--  transformer. A consumer that needs to see the existing state to
+--  decide what to do with a change (e.g. resolve a reverse-dependency
+--  index for a hot-reload) has to maintain a mirror outside the
+--  library.
+--
+-- 'unionMountStreaming' addresses both. The handler is
+-- @Change -> model -> m model@: the library hands it the current model
+-- and expects the next one. The consumer can fold per-file updates
+-- through the model one at a time (so each closure is GC'd as soon as
+-- its update has been applied) and read the running state directly when
+-- deciding how to react.
+--
+-- Caller-side, the typical fold pattern is:
+--
+-- @
+-- \\change m -> foldlM step m (changeToList change)
+--  where step m c = do { f <- perFileHandler c m; pure $! f m }
+-- @
+--
+-- The streaming benefit (memory) is realised on the initial batch
+-- (motivates @srid/emanote#66@). fsnotify-driven incremental updates use
+-- the same handler; those paths only ever supply one file's change at a
+-- time, so streaming is a no-op for them — but the read-current-model
+-- capability still applies and is the lever downstream consumers reach
+-- for during incremental updates (see @srid/emanote#263@'s Lua-filter
+-- hot-reload reverse-index lookup).
+--
+-- Ignore patterns follow the same per-source contract as 'unionMount';
+-- see that function's haddock.
+unionMountStreaming ::
+  forall source tag model m.
+  ( MonadIO m,
+    MonadUnliftIO m,
+    MonadLogger m,
+    Ord source,
+    Ord tag
+  ) =>
+  Set (source, (FilePath, Maybe FilePath)) ->
+  [(tag, FilePattern)] ->
+  -- | Per-source ignore patterns.
+  Map source [FilePattern] ->
+  model ->
+  (Change source tag -> model -> m model) ->
+  m (model, (model -> m ()) -> m ())
+unionMountStreaming sources pats perSourceIgnore model0 handleAction = do
+  (x0, xf) <- unionMount' sources pats perSourceIgnore
+  initial <- interceptExceptions model0 $ handleAction x0 model0
+  lvar <- LVar.new initial
+  let sender send = do
+        Cmd_Remount <- xf $ \change -> do
+          old <- LVar.get lvar
+          new <- interceptExceptions old $ handleAction change old
+          LVar.set lvar new
+          send new
+        log LevelInfo "Remounting..."
+        (a, b) <- unionMountStreaming sources pats perSourceIgnore model0 handleAction
+        send a
+        b send
+  pure (initial, sender)
 
 -- Log and ignore exceptions
 --
