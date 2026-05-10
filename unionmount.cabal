@@ -26,23 +26,17 @@ flag ghcid
 
 common library-common
   build-depends:
-    , async
     , base          >=4.13.0 && <5
-    , bytestring
     , containers
-    , data-default
     , directory
     , filepath
     , filepattern
     , fsnotify      >=0.4.0  && <0.5
-    , lvar
     , monad-logger
     , mtl
     , relude
     , text
-    , time
     , unliftio
-    , with-utf8
 
   mixins:
     base hiding (Prelude),
@@ -81,8 +75,10 @@ test-suite test
   hs-source-dirs: test
   main-is:        Spec.hs
   build-depends:
+    , bytestring
     , dir-traverse
     , hspec
+    , lvar
     , monad-logger
     , monad-logger-extras
     , QuickCheck

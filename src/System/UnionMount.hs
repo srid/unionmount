@@ -24,7 +24,6 @@ import Control.Monad.Logger
     MonadLogger,
     logWithoutLoc,
   )
-import Data.LVar qualified as LVar
 import Data.Map.Strict qualified as Map
 import System.Directory (canonicalizePath)
 import System.FSNotify
@@ -51,6 +50,7 @@ import System.UnionMount.Internal
     overlayFsRemove,
   )
 import UnliftIO (MonadUnliftIO, finally, race, try, withRunInIO)
+import UnliftIO.MVar (modifyMVar)
 
 -- | Simplified version of `unionMount` with exactly one layer.
 mount ::
@@ -189,12 +189,19 @@ unionMountStreaming ::
 unionMountStreaming sources pats perSourceIgnore model0 handleAction = do
   (x0, xf) <- unionMount' sources pats perSourceIgnore
   initial <- interceptExceptions model0 $ handleAction x0 model0
-  lvar <- LVar.new initial
+  -- 'MVar' (with 'modifyMVar') makes the get → handler → set
+  -- transition structurally atomic and exception-safe: a throw inside
+  -- the handler restores the slot to the prior value via 'modifyMVar's
+  -- 'bracket', and a concurrent take blocks rather than racing.
+  -- 'IORef' would force the handler to live outside the atomic
+  -- combinator (it accepts only pure @a -> (a, b)@), so 'MVar' is
+  -- the fit. Resolves #18.
+  mvar <- newMVar initial
   let sender send = do
         Cmd_Remount <- xf $ \change -> do
-          old <- LVar.get lvar
-          new <- interceptExceptions old $ handleAction change old
-          LVar.set lvar new
+          new <- modifyMVar mvar $ \old -> do
+            new <- interceptExceptions old $ handleAction change old
+            pure (new, new)
           send new
         log LevelInfo "Remounting..."
         (a, b) <- unionMountStreaming sources pats perSourceIgnore model0 handleAction
