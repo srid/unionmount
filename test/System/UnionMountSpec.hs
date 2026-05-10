@@ -199,6 +199,65 @@ spec = do
           finalModel <- LVar.get model
           Map.lookup "secret.txt" finalModel `shouldBe` Just ["B"]
           Map.lookup "public.txt" finalModel `shouldBe` Just ["A"]
+  describe "unionMountStreaming" $ do
+    it "handler observes the running model when folding the initial batch" $ do
+      -- Three files; handler reads the model size *before* applying its own
+      -- update for each file. Across the batch the handler should observe
+      -- sizes {0, 1, 2} — the pre-step states as files are folded one at
+      -- a time. This is the read-current-model capability that the
+      -- streaming variant exists to provide.
+      withSystemTempDirectory "streamingObserve" $ \dir -> do
+        writeFile (dir </> "a.txt") "a"
+        writeFile (dir </> "b.txt") "b"
+        writeFile (dir </> "c.txt") "c"
+        observed <- newIORef Set.empty
+        let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
+            pats = [((), "*.txt")]
+        (model0, _patch) <- flip runLoggerLoggingT logToNowhere $
+          UM.unionMountStreaming layers pats mempty (mempty :: Set FilePath) $ \change m0 ->
+            foldlM
+              ( \m (fp, _act) -> do
+                  liftIO $ atomicModifyIORef' observed $ \s -> (Set.insert (Set.size m) s, ())
+                  pure $ Set.insert fp m
+              )
+              m0
+              (Map.toList $ Unsafe.fromJust $ Map.lookup () change)
+        seen <- readIORef observed
+        seen `shouldBe` Set.fromList [0, 1, 2]
+        model0 `shouldBe` Set.fromList ["a.txt", "b.txt", "c.txt"]
+    it "fsnotify-driven update sees the prior model state" $ do
+      -- Pre-existing file A is in the model. User creates file B at runtime.
+      -- When the streaming handler fires for B, it must see A already in
+      -- the model — that's the hot-reload reverse-index lookup pattern.
+      withSystemTempDirectory "streamingLive" $ \dir -> do
+        writeFile (dir </> "a.txt") "a"
+        sawAOnB <- newIORef False
+        model <- LVar.empty
+        let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
+            pats = [((), "*.txt")]
+        flip runLoggerLoggingT logToNowhere $ do
+          (model0, patch) <-
+            UM.unionMountStreaming layers pats mempty (mempty :: Set FilePath) $ \change m0 ->
+              foldlM
+                ( \m (fp, _act) -> do
+                    when (fp == "b.txt" && Set.member "a.txt" m) $
+                      liftIO $
+                        atomicModifyIORef' sawAOnB $
+                          \_ -> (True, ())
+                    pure $ Set.insert fp m
+                )
+                m0
+                (Map.toList $ Unsafe.fromJust $ Map.lookup () change)
+          LVar.set model model0
+          race_
+            (patch $ LVar.set model)
+            ( do
+                threadDelay fsnotifyWatcherSetupDelay
+                writeFile (dir </> "b.txt") "b"
+                _ <- waitForModel model (Set.fromList ["a.txt", "b.txt"])
+                pass
+            )
+        liftIO (readIORef sawAOnB) `shouldReturn` True
 
 -- | Test `UM.unionMount` on a set of folders whose contents/mutations are
 -- represented by a `FolderMutation`, and check that the resulting model is
