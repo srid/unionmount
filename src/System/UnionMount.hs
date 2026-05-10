@@ -121,22 +121,14 @@ unionMount ::
   model ->
   (Change source tag -> m (model -> model)) ->
   m (model, (model -> m ()) -> m ())
-unionMount sources pats perSourceIgnore model0 handleAction = do
-  (x0, xf) <- unionMount' sources pats perSourceIgnore
-  x0' <- interceptExceptions id $ handleAction x0
-  let initial = x0' model0
-  lvar <- LVar.new initial
-  let sender send = do
-        Cmd_Remount <- xf $ \change -> do
-          change' <- interceptExceptions id $ handleAction change
-          LVar.modify lvar change'
-          x <- LVar.get lvar
-          send x
-        log LevelInfo "Remounting..."
-        (a, b) <- unionMount sources pats perSourceIgnore model0 handleAction
-        send a
-        b send
-  pure (x0' model0, sender)
+unionMount sources pats perSourceIgnore model0 handleAction =
+  -- A 'Change -> m (model -> model)' handler is the lazy variant of
+  -- a 'Change -> model -> m model' handler. Adapt and delegate, so
+  -- there is exactly one place that owns the LVar fold and the
+  -- remount loop.
+  unionMountStreaming sources pats perSourceIgnore model0 $ \change m -> do
+    f <- handleAction change
+    pure (f m)
 
 -- | Streaming variant of 'unionMount' whose handler reads the current model.
 --
