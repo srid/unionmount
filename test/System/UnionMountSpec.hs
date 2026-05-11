@@ -3,7 +3,8 @@
 
 module System.UnionMountSpec where
 
-import Control.Monad.Logger.Extras (logToNowhere, runLoggerLoggingT)
+import Control.Monad.Logger (LogLevel (LevelWarn))
+import Control.Monad.Logger.Extras (Logger (Logger), logToNowhere, runLoggerLoggingT)
 import Data.LVar qualified as LVar
 import Data.List (stripPrefix)
 import Data.List.NonEmpty qualified as NE
@@ -11,7 +12,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Traversable (for)
 import Relude.Unsafe qualified as Unsafe
-import System.Directory (createDirectory)
+import System.Directory (createDirectory, createDirectoryIfMissing)
 import System.Directory.Recursive (getFilesRecursive)
 import System.FilePath ((</>))
 import System.FilePattern (FilePattern, (?==))
@@ -199,6 +200,45 @@ spec = do
           finalModel <- LVar.get model
           Map.lookup "secret.txt" finalModel `shouldBe` Just ["B"]
           Map.lookup "public.txt" finalModel `shouldBe` Just ["A"]
+    it "ignored live folder events do not warn or block later file events" $ do
+      withSystemTempDirectory "ignoredFolderLive" $ \dir -> do
+        createDirectoryIfMissing True (dir </> ".git" </> "objects")
+        model <- LVar.empty
+        warnCount <- newIORef (0 :: Int)
+        let layers = Set.singleton (dir :: FilePath, (dir, Nothing))
+            pats = [((), "*.txt")]
+            perSource = Map.singleton dir ["**/.*/**"]
+            countWarnings = Logger $ \_ _ level _ ->
+              when (level == LevelWarn) $
+                atomicModifyIORef' warnCount $
+                  \n -> (n + 1, ())
+            applyChange change =
+              pure $
+                \m0 ->
+                  foldl'
+                    ( \m (fp, act) ->
+                        case act of
+                          UM.Delete -> Set.delete fp m
+                          UM.Refresh {} -> Set.insert fp m
+                    )
+                    m0
+                    (Map.toList $ Map.findWithDefault mempty () change)
+        flip runLoggerLoggingT countWarnings $ do
+          (model0, patch) <- UM.unionMount layers pats perSource Set.empty applyChange
+          LVar.set model model0
+          race_
+            (patch $ LVar.set model)
+            ( do
+                threadDelay fsnotifyWatcherSetupDelay
+                liftIO $ createDirectory (dir </> ".git" </> "objects" </> "3b")
+                threadDelay 300_000
+                writeFile (dir </> "public.txt") "visible"
+                _ <- waitForModel model (Set.singleton "public.txt")
+                pass
+            )
+        finalModel <- LVar.get model
+        finalModel `shouldBe` Set.singleton "public.txt"
+        readIORef warnCount `shouldReturn` 0
   describe "unionMountStreaming" $ do
     it "handler observes the running model when folding the initial batch" $ do
       -- Three files; handler reads the model size *before* applying its own

@@ -270,7 +270,7 @@ unionMount' sources pats perSourceIgnore = do
           -- Run fsnotify on sources
           q :: TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) <- liftIO newEmptyTMVarIO
           fmap (either id id) $
-            race (onChange q (toList sources)) $
+            race (onChange q (watchedRoot <$> toList sources)) $
               let readDebounced = do
                     -- Wait for some initial action in the queue.
                     _ <- atomically $ readTMVar q
@@ -282,20 +282,14 @@ unionMount' sources pats perSourceIgnore = do
                       =<< atomically (tryTakeTMVar q)
                   loop = do
                     (src, mountPoint, fp, actE) <- readDebounced
-                    let shouldIgnore = any (?== fp) (ignoreFor src)
                     case actE of
                       Left _ -> do
                         let reason = "Unhandled folder event on '" <> toText fp <> "'"
-                        if shouldIgnore
-                          then do
-                            log LevelWarn $ reason <> " on an ignored path"
-                            loop
-                          else do
-                            -- We don't know yet how to deal with folder events. Just reboot the mount.
-                            log LevelWarn $ reason <> "; suggesting a re-mount"
-                            pure Cmd_Remount -- Exit, asking user to remokunt
+                        -- We don't know yet how to deal with folder events. Just reboot the mount.
+                        log LevelWarn $ reason <> "; suggesting a re-mount"
+                        pure Cmd_Remount -- Exit, asking user to remokunt
                       Right act -> do
-                        case guard (not shouldIgnore) >> getTag pats fp of
+                        case getTag pats fp of
                           Nothing -> loop
                           Just tag -> do
                             changes <- fmap snd . flip runStateT Map.empty $ do
@@ -307,6 +301,12 @@ unionMount' sources pats perSourceIgnore = do
   where
     ignoreFor :: source -> [FilePattern]
     ignoreFor src = Map.findWithDefault [] src perSourceIgnore
+
+    ignoredBy :: source -> FilePath -> Bool
+    ignoredBy src fp = any (?== fp) (ignoreFor src)
+
+    watchedRoot :: (source, (FilePath, Maybe FilePath)) -> (source, (FilePath, Maybe FilePath), FilePath -> Bool)
+    watchedRoot (src, root) = (src, root, ignoredBy src)
 
 filesMatching :: (MonadIO m, MonadLogger m) => FilePath -> [FilePattern] -> [FilePattern] -> m [FilePath]
 filesMatching parent' pats ignore = do
@@ -356,23 +356,25 @@ onChange ::
   forall x m.
   (Eq x, MonadIO m, MonadLogger m, MonadUnliftIO m) =>
   TMVar (x, Maybe FilePath, FilePath, Either (FolderAction ()) (FileAction ())) ->
-  [(x, (FilePath, Maybe FilePath))] ->
+  [(x, (FilePath, Maybe FilePath), FilePath -> Bool)] ->
   -- | The filepath is relative to the folder being monitored, unless if its
   -- ancestor is a symlink.
   m Cmd
 onChange q roots = do
   withManagerM $ \mgr -> do
-    stops <- forM roots $ \(x, (rootRel, mountPoint)) -> do
+    stops <- forM roots $ \(x, (rootRel, mountPoint), shouldIgnore) -> do
       -- NOTE: It is important to use canonical path, because this will allow us to
       -- transform fsnotify event's (absolute) path into one that is relative to
       -- @parent'@ (as passed by user), which is what @f@ will expect.
       root <- liftIO $ canonicalizePath rootRel
       log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
-      watchTreeM mgr root (const True) $ \event -> do
+      let relativePath = makeRelative root . eventPath
+          admitEvent = not . shouldIgnore . relativePath
+      watchTreeM mgr root admitEvent $ \event -> do
         log LevelDebug $ show event
         atomically $ do
           lastQ <- tryTakeTMVar q
-          let fp = makeRelative root $ eventPath event
+          let fp = relativePath event
               f act = putTMVar q (x, mountPoint, fp, act)
               -- Re-add last item to the queue
               reAddQ = forM_ lastQ (putTMVar q)
