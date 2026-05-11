@@ -368,37 +368,36 @@ onChange q roots = do
       -- @parent'@ (as passed by user), which is what @f@ will expect.
       root <- liftIO $ canonicalizePath rootRel
       log LevelInfo $ toText $ "Monitoring " <> root <> " for changes"
-      watchTreeM mgr root (const True) $ \event -> do
+      let relativePath = makeRelative root . eventPath
+          admitEvent = not . shouldIgnore . relativePath
+      watchTreeM mgr root admitEvent $ \event -> do
         log LevelDebug $ show event
         atomically $ do
           lastQ <- tryTakeTMVar q
-          let fp = makeRelative root $ eventPath event
+          let fp = relativePath event
               f act = putTMVar q (x, mountPoint, fp, act)
               -- Re-add last item to the queue
               reAddQ = forM_ lastQ (putTMVar q)
-          if shouldIgnore fp
-            then reAddQ
-            else
-              if eventIsDirectory event == IsDirectory
-                then f $ Left $ FolderAction ()
-                else do
-                  let newAction = case event of
-                        Added {} -> Just $ Refresh New ()
-                        Modified {} -> Just $ Refresh Update ()
-                        ModifiedAttributes {} -> Just $ Refresh Update ()
-                        Removed {} -> Just Delete
-                        _ -> Nothing
-                  -- Merge with the last action when it makes sense to do so.
-                  case (lastQ, newAction) of
-                    (_, Nothing) -> reAddQ
-                    (Just (lastTag, _lastMountPoint, lastFp, Right lastAction), Just a)
-                      | lastTag == x && lastFp == fp ->
-                          case (lastAction, a) of
-                            (Delete, Refresh New ()) -> f $ Right $ Refresh Update ()
-                            (Refresh New (), Refresh Update ()) -> f $ Right $ Refresh New ()
-                            (Refresh New (), Delete) -> pure ()
-                            _ -> f $ Right a
-                    (_, Just a) -> reAddQ >> f (Right a)
+          if eventIsDirectory event == IsDirectory
+            then f $ Left $ FolderAction ()
+            else do
+              let newAction = case event of
+                    Added {} -> Just $ Refresh New ()
+                    Modified {} -> Just $ Refresh Update ()
+                    ModifiedAttributes {} -> Just $ Refresh Update ()
+                    Removed {} -> Just Delete
+                    _ -> Nothing
+              -- Merge with the last action when it makes sense to do so.
+              case (lastQ, newAction) of
+                (_, Nothing) -> reAddQ
+                (Just (lastTag, _lastMountPoint, lastFp, Right lastAction), Just a)
+                  | lastTag == x && lastFp == fp ->
+                      case (lastAction, a) of
+                        (Delete, Refresh New ()) -> f $ Right $ Refresh Update ()
+                        (Refresh New (), Refresh Update ()) -> f $ Right $ Refresh New ()
+                        (Refresh New (), Delete) -> pure ()
+                        _ -> f $ Right a
+                (_, Just a) -> reAddQ >> f (Right a)
     liftIO (threadDelay maxBound)
       `finally` do
         log LevelInfo "Stopping fsnotify monitor."
